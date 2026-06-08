@@ -1,72 +1,50 @@
-# Agent persona and model configuration.
-# Swap personas and model endpoints without touching Python code.
-# All model ids must match entries in nim/config.yaml.
+# Agent persona and model configuration
+# Swap agent roles and model endpoints without touching Python code
+
+default_agent_model: meta/llama-3.1-70b-instruct
 
 agents:
-  orchestrator:
-    name: Orchestrator
-    description: "Top-level coordinator that routes between planner, executor, and reviewer."
+  planner:
+    model: meta/llama-3.1-70b-instruct
+    temperature: 0.0
+    max_tokens: 1024
+    description: Decomposes user intent into ordered subtasks
+    system_prompt_override: null  # Use default in planner.py
+
+  executor:
+    model: meta/llama-3.1-8b-instruct
+    temperature: 0.0
+    max_tokens: 2048
+    description: Routes tasks to specialist sub-agents
+
+  reviewer:
+    model: meta/llama-3.1-70b-instruct
+    temperature: 0.0
+    max_tokens: 512
+    description: Scores executor output and decides next action
+
+  api_agent:
+    model: mistralai/mistral-nemo-12b-instruct
+    temperature: 0.1
+    max_tokens: 2048
+    description: REST API tool-calling specialist
+    tools: [http_get, http_post]
+
+  sql_agent:
     model: meta/llama-3.1-70b-instruct
     temperature: 0.0
     max_tokens: 2048
-    system_prompt: >
-      You are a precise enterprise AI orchestrator. Decompose complex requests
-      into discrete tasks and coordinate specialist agents to complete them.
-      Always verify outputs before delivering a final answer.
-
-  planner:
-    name: Planner
-    description: "Decomposes user intent into ordered, atomic tasks."
-    model: meta/llama-3.1-70b-instruct
-    temperature: 0.0
-    max_tokens: 1024
-    system_prompt: >
-      You are a task planner. Break down complex goals into ordered steps.
-      Each step must be self-contained and executable by a single specialist tool.
-
-  executor:
-    name: Executor
-    description: "Runs tool calls and synthesises results per task."
-    model: meta/llama-3.1-8b-instruct
-    temperature: 0.0
-    max_tokens: 1024
-    system_prompt: >
-      You are a task executor. Complete the assigned task using the available tools.
-      Be precise and concise. Return only the relevant result.
-
-  reviewer:
-    name: Reviewer
-    description: "Evaluates executor output quality and routes the pipeline."
-    model: meta/llama-3.1-70b-instruct
-    temperature: 0.0
-    max_tokens: 256
-    system_prompt: >
-      You are a quality reviewer. Score outputs strictly and fairly.
-      Only approve outputs that directly and completely address the task.
-
-  api_agent:
-    name: API Specialist
-    description: "Handles REST API interactions."
-    model: meta/llama-3.1-8b-instruct
-    temperature: 0.0
-    max_tokens: 1024
-
-  sql_agent:
-    name: SQL Specialist
-    description: "Handles text-to-SQL queries."
-    model: meta/llama-3.1-8b-instruct
-    temperature: 0.0
-    max_tokens: 1024
+    description: Text-to-SQL specialist
+    tools: [sql_query, sql_describe]
 
   doc_agent:
-    name: Document Specialist
-    description: "Handles document retrieval and grounded Q&A."
     model: meta/llama-3.1-8b-instruct
-    temperature: 0.0
-    max_tokens: 1024
+    temperature: 0.2
+    max_tokens: 2048
+    description: Document store semantic retrieval specialist
+    tools: [search_documents]
 
-pipeline:
-  max_retries: 3
-  reviewer_threshold: 0.65
-  langfuse_tracing: true
-  log_level: INFO
+routing:
+  max_retries: 2
+  reviewer_accept_threshold: 0.75
+  fallback_agent: doc_agent

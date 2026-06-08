@@ -1,86 +1,56 @@
-"""FastAPI server — exposes the multi-agent pipeline over HTTP.
-
-Endpoints:
-  POST /v1/run     — run a full agentic pipeline for a given intent
-  GET  /v1/health  — NIM and service health check
-  GET  /           — liveness probe
-"""
+"""FastAPI server exposing the NIM multi-agent toolkit."""
 from __future__ import annotations
 
-import logging
-import os
-import time
-from typing import Any
+import uuid
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from dotenv import load_dotenv
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
-load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+from nim.health_check import is_nim_ready
+from orchestrator.graph import run_agent, build_graph
 
 app = FastAPI(
     title="NVIDIA NIM Agent Toolkit",
-    description="Multi-agent coordination powered by NVIDIA NIM inference microservices.",
+    description="Multi-agent coordination system powered by NVIDIA NIM + LangGraph",
     version="1.0.0",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
+
+class QueryRequest(BaseModel):
+    query: str
+    thread_id: Optional[str] = None
 
 
-class RunRequest(BaseModel):
-    intent: str = Field(..., description="User intent / query to execute")
-    model: str | None = Field(default=None, description="Override default NIM model")
+class QueryResponse(BaseModel):
+    thread_id: str
+    answer: str
 
 
-class RunResponse(BaseModel):
-    intent: str
-    final_answer: str
-    task_count: int
-    reviewer_score: float
-    latency_sec: float
+@app.get("/health")
+def health() -> dict:
+    nim_ok = is_nim_ready()
+    return {"status": "ok", "nim_ready": nim_ok}
 
 
-@app.get("/", tags=["health"])
-def liveness() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.get("/v1/health", tags=["health"])
-def health_check() -> dict[str, Any]:
-    from nim.client import NIMClient
-
-    client = NIMClient()
-    nim_status = client.health_check()
-    return {"service": "ok", "nim": nim_status}
-
-
-@app.post("/v1/run", response_model=RunResponse, tags=["agent"])
-def run_agent(request: RunRequest) -> RunResponse:
-    from nim.client import NIMClient
-    from orchestrator.graph import run as run_pipeline
-
-    client = NIMClient(model=request.model) if request.model else NIMClient()
-
-    start = time.perf_counter()
+@app.post("/query", response_model=QueryResponse)
+def query(request: QueryRequest) -> QueryResponse:
+    """Run the multi-agent pipeline for a single query."""
+    thread_id = request.thread_id or str(uuid.uuid4())
     try:
-        state = run_pipeline(intent=request.intent, client=client)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Pipeline error: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        answer = run_agent(request.query, thread_id=thread_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return QueryResponse(thread_id=thread_id, answer=answer)
 
-    latency = round(time.perf_counter() - start, 3)
-    return RunResponse(
-        intent=request.intent,
-        final_answer=state.get("final_answer", ""),
-        task_count=len(state.get("task_list", [])),
-        reviewer_score=state.get("reviewer_score", 0.0),
-        latency_sec=latency,
-    )
+
+@app.get("/models")
+def list_models() -> dict:
+    """List available NIM models."""
+    from nim.client import get_client
+    try:
+        models = get_client().list_models()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"NIM unavailable: {e}")
+    return {"models": models}
