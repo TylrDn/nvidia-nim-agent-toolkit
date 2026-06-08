@@ -1,57 +1,66 @@
-"""Reviewer node — validates executor output and routes retry or done.
-
-Scores the last tool result on a 0.0–1.0 scale. If below threshold,
-the graph loops back to the executor. After MAX_RETRIES, exits regardless.
-"""
+"""Reviewer node — scores executor output and decides to retry or advance."""
 from __future__ import annotations
 
-import logging
-import json
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from nim.client import NIMClient
 from orchestrator.state import AgentState
-from nim.client import get_default_llm
 
-logger = logging.getLogger(__name__)
+_SYSTEM_PROMPT = """\
+You are a quality-review agent. Given a task description and the result
+produced by the executor, score the result from 0.0 to 1.0.
 
-SYSTEM_PROMPT = """You are a quality reviewer for AI agent outputs.
-Given a task and its result, score the result from 0.0 to 1.0 where:
-- 1.0 = complete, accurate, actionable
-- 0.5 = partially complete or needs clarification
-- 0.0 = wrong, empty, or errored
+Return ONLY a JSON object: {"score": <float>, "reasoning": <str>}
+"""
 
-Return ONLY a JSON object: {"score": <float>, "feedback": "<one sentence>"}"""
+_RETRY_THRESHOLD = 0.6
+_MAX_RETRIES = 2
+
+_llm = NIMClient().get_llm()
 
 
-def reviewer_node(state: AgentState) -> dict:
-    """LangGraph node: score the latest tool result.
+def reviewer_node(state: AgentState) -> AgentState:
+    """Score latest result and update reviewer_score in state."""
+    import json
 
-    Args:
-        state: Current AgentState with tool_results populated.
+    tasks = state["tasks"]
+    idx = state["current_task_idx"]
+    results = state["results"]
 
-    Returns:
-        Partial state update with reviewer_score and incremented retry_count if needed.
-    """
-    results = state.get("tool_results", [])
-    if not results:
-        return {"reviewer_score": 0.0, "retry_count": state.get("retry_count", 0) + 1}
+    if not results or idx >= len(tasks):
+        return {**state, "reviewer_score": 1.0}
 
-    last = results[-1]
-    llm = get_default_llm()
+    task = tasks[idx]
+    latest_result = results[-1]["result"]
 
+    prompt = f"Task: {task['description']}\n\nResult: {latest_result}"
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Task: {last['task']}\nResult: {last['output']}"},
+        SystemMessage(content=_SYSTEM_PROMPT),
+        HumanMessage(content=prompt),
     ]
-
+    response = _llm.invoke(messages)
     try:
-        response = llm.invoke(messages)
-        data = json.loads(response.content)
-        score = float(data.get("score", 0.5))
-        logger.info("Reviewer score: %.2f — %s", score, data.get("feedback", ""))
-    except Exception as exc:
-        logger.warning("Reviewer parse error: %s — defaulting score to 0.5", exc)
+        parsed = json.loads(response.content)
+        score = float(parsed.get("score", 0.5))
+    except (json.JSONDecodeError, ValueError):
         score = 0.5
 
     return {
+        **state,
         "reviewer_score": score,
-        "retry_count": state.get("retry_count", 0) + (1 if score < 0.7 else 0),
+        "messages": state["messages"] + [response],
     }
+
+
+def should_retry(state: AgentState) -> str:
+    """Conditional edge: 'retry', 'advance', or 'done'."""
+    score = state.get("reviewer_score", 1.0)
+    retry_count = state.get("retry_count", 0)
+    idx = state["current_task_idx"]
+    total = len(state["tasks"])
+
+    if score < _RETRY_THRESHOLD and retry_count < _MAX_RETRIES:
+        return "retry"
+    if idx + 1 < total:
+        return "advance"
+    return "done"

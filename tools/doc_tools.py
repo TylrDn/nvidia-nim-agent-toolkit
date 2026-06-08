@@ -1,50 +1,25 @@
-"""Document store retrieval StructuredTool.
-
-Performs keyword or semantic search over an in-memory FAISS store.
-In production, swap the store for pgvector or Milvus.
-"""
+"""Standalone document retrieval tools importable outside the agent context."""
 from __future__ import annotations
 
-from langchain_core.tools import tool
-from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings
-from nim.client import NIMClient
+from typing import Any
 
-# Module-level store — populated via load_documents() before agent runs
-_store: FAISS | None = None
+from langchain.tools import StructuredTool
+from pydantic import BaseModel, Field
 
 
-def load_documents(texts: list[str]) -> None:
-    """Load raw text chunks into the in-memory FAISS store.
-
-    Args:
-        texts: List of plain-text document chunks.
-    """
-    global _store
-    # TODO: replace with NIM embedding endpoint
-    embeddings = OpenAIEmbeddings(
-        base_url=NIMClient().base_url,
-        api_key=NIMClient().api_key,  # type: ignore[arg-type]
-        model="nv-embedqa-e5-v5",
-    )
-    _store = FAISS.from_texts(texts, embeddings)
+class DocRetrieveInput(BaseModel):
+    query: str = Field(..., description="Natural language search query")
+    top_k: int = Field(default=4)
 
 
-@tool
-def doc_search(query: str, k: int = 4) -> str:
-    """Search documents for the most relevant chunks.
-
-    Args:
-        query: Natural language search query.
-        k: Number of top chunks to return.
-
-    Returns:
-        Top-k document chunks concatenated as a string.
-    """
-    if _store is None:
-        return "Document store not initialised. Call load_documents() first."
-    docs = _store.similarity_search(query, k=k)
-    return "\n---\n".join(d.page_content for d in docs)
+def _stub_retrieve(query: str, top_k: int = 4) -> dict[str, Any]:
+    """Stub — replace with live vectorstore in agents/doc_agent.py."""
+    return {"chunks": [f"[stub chunk {i} for: {query}]" for i in range(top_k)]}
 
 
-doc_tool = doc_search
+DOC_RETRIEVE_TOOL = StructuredTool.from_function(
+    func=_stub_retrieve,
+    name="retrieve_docs",
+    description="Retrieve relevant document chunks from the vector store.",
+    args_schema=DocRetrieveInput,
+)

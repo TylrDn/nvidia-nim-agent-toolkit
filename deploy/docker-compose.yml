@@ -1,43 +1,59 @@
 version: "3.9"
 
 services:
+  # -----------------------------------------------------------------------
+  # NVIDIA NIM inference microservice (mock / local dev)
+  # Replace image with a real NGC NIM image for GPU environments.
+  # -----------------------------------------------------------------------
+  nim:
+    image: vllm/vllm-openai:latest   # swap for nvcr.io/nim/<model> on GPU host
+    container_name: nim
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    ports:
+      - "8000:8000"
+    command: >
+      --model ${NIM_MODEL:-facebook/opt-125m}
+      --host 0.0.0.0
+      --port 8000
+      --dtype float16
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # -----------------------------------------------------------------------
+  # Orchestrator API — FastAPI wrapper around the LangGraph graph
+  # -----------------------------------------------------------------------
   orchestrator:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    ports:
-      - "8000:8000"
+    container_name: nim-orchestrator
+    env_file:
+      - ../.env
     environment:
-      - NIM_API_KEY=${NIM_API_KEY}
-      - NIM_BASE_URL=${NIM_BASE_URL}
-      - NIM_MODEL=${NIM_MODEL}
-      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY}
-      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2}
-      - DATABASE_URL=postgresql://agent:agent@postgres:5432/agentdb
+      - NIM_BASE_URL=http://nim:8000/v1
+    ports:
+      - "8080:8080"
     depends_on:
-      postgres:
+      nim:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
       timeout: 5s
-      retries: 5
+      retries: 3
 
-  postgres:
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_USER: agent
-      POSTGRES_PASSWORD: agent
-      POSTGRES_DB: agentdb
-    ports:
-      - "5432:5432"
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agent -d agentdb"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-volumes:
-  pg_data:
+networks:
+  default:
+    name: nim-network

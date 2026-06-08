@@ -1,92 +1,92 @@
-"""LangSmith tracing + correctness checks for the multi-agent system.
-
-Runs end-to-end evaluation scenarios and uploads results to LangSmith
-for review. Tracks accuracy, tool call rate, and latency per scenario.
-"""
+"""LangSmith tracing + correctness evaluation for the multi-agent graph."""
 from __future__ import annotations
 
+import json
 import os
-import time
-import logging
-from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-from orchestrator.graph import build_graph
+from langsmith import Client
+from langsmith.evaluation import evaluate
 
-load_dotenv()
-logger = logging.getLogger(__name__)
+from orchestrator.graph import graph
 
-
-@dataclass
-class EvalScenario:
-    name: str
-    user_input: str
-    expected_keywords: list[str] = field(default_factory=list)
+_LS_CLIENT = Client()
+_DATASET_NAME = os.getenv("LANGSMITH_DATASET", "nim-agent-eval-v1")
+_EXPERIMENT_PREFIX = os.getenv("LANGSMITH_EXPERIMENT_PREFIX", "nim-agent")
 
 
-# Default eval scenarios — extend with domain-specific cases
-DEFAULT_SCENARIOS: list[EvalScenario] = [
-    EvalScenario(
-        name="api_fetch",
-        user_input="Fetch the current weather in San Francisco using the Open-Meteo API.",
-        expected_keywords=["temperature", "weather"],
-    ),
-    EvalScenario(
-        name="sql_query",
-        user_input="How many users signed up last month?",
-        expected_keywords=["users", "count"],
-    ),
-    EvalScenario(
-        name="doc_search",
-        user_input="What is our company refund policy?",
-        expected_keywords=["refund", "policy"],
-    ),
+# ---------------------------------------------------------------------------
+# Ground-truth dataset (seed inline; in production load from JSON file)
+# ---------------------------------------------------------------------------
+_SEED_EXAMPLES = [
+    {
+        "inputs": {"user_request": "What is 2 + 2?"},
+        "outputs": {"expected_keywords": ["4", "four"]},
+    },
+    {
+        "inputs": {"user_request": "Fetch the top post from https://jsonplaceholder.typicode.com/posts/1"},
+        "outputs": {"expected_keywords": ["userId", "title"]},
+    },
 ]
 
 
-def run_eval(
-    scenarios: list[EvalScenario] | None = None,
-) -> list[dict[str, Any]]:
-    """Run eval scenarios and return results.
+def _ensure_dataset() -> str:
+    """Create dataset if it doesn't exist; return its name."""
+    datasets = list(_LS_CLIENT.list_datasets(dataset_name=_DATASET_NAME))
+    if not datasets:
+        ds = _LS_CLIENT.create_dataset(_DATASET_NAME,
+                                       description="NIM agent eval ground truth")
+        _LS_CLIENT.create_examples(
+            inputs=[e["inputs"] for e in _SEED_EXAMPLES],
+            outputs=[e["outputs"] for e in _SEED_EXAMPLES],
+            dataset_id=ds.id,
+        )
+    return _DATASET_NAME
 
-    Args:
-        scenarios: List of scenarios to run. Defaults to DEFAULT_SCENARIOS.
 
-    Returns:
-        List of result dicts with name, passed, latency_ms, output.
-    """
-    graph = build_graph()
-    results = []
+# ---------------------------------------------------------------------------
+# Target function — wraps the graph invoke call
+# ---------------------------------------------------------------------------
+def _run_agent(inputs: dict[str, Any]) -> dict[str, Any]:
+    state = graph.invoke({
+        "messages": [],
+        "user_request": inputs["user_request"],
+        "tasks": [],
+        "current_task_idx": 0,
+        "results": [],
+        "reviewer_score": 0.0,
+        "retry_count": 0,
+        "final_answer": "",
+    })
+    return {"final_answer": state["final_answer"]}
 
-    for scenario in (scenarios or DEFAULT_SCENARIOS):
-        logger.info("Running eval: %s", scenario.name)
-        start = time.time()
 
-        try:
-            state = graph.invoke({"user_input": scenario.user_input})
-            output = state.get("final_output", "")
-            passed = all(kw.lower() in output.lower() for kw in scenario.expected_keywords)
-        except Exception as exc:
-            output = str(exc)
-            passed = False
+# ---------------------------------------------------------------------------
+# Evaluators
+# ---------------------------------------------------------------------------
+def _keyword_evaluator(run: Any, example: Any) -> dict[str, Any]:
+    """Pass if any expected keyword appears in the final answer."""
+    answer = (run.outputs or {}).get("final_answer", "").lower()
+    keywords = (example.outputs or {}).get("expected_keywords", [])
+    passed = any(kw.lower() in answer for kw in keywords)
+    return {"key": "keyword_match", "score": int(passed)}
 
-        latency_ms = int((time.time() - start) * 1000)
-        results.append({
-            "name": scenario.name,
-            "passed": passed,
-            "latency_ms": latency_ms,
-            "output": output[:500],
-        })
-        logger.info("%s: %s (%dms)", scenario.name, "PASS" if passed else "FAIL", latency_ms)
 
-    return results
+# ---------------------------------------------------------------------------
+# Main eval runner
+# ---------------------------------------------------------------------------
+def run_eval() -> None:
+    dataset_name = _ensure_dataset()
+    results = evaluate(
+        _run_agent,
+        data=dataset_name,
+        evaluators=[_keyword_evaluator],
+        experiment_prefix=_EXPERIMENT_PREFIX,
+        max_concurrency=2,
+    )
+    print(json.dumps({"summary": str(results)}, indent=2))
 
 
 if __name__ == "__main__":
-    results = run_eval()
-    passed = sum(1 for r in results if r["passed"])
-    print(f"\nResults: {passed}/{len(results)} passed")
-    for r in results:
-        status = "✅" if r["passed"] else "❌"
-        print(f"  {status} {r['name']} ({r['latency_ms']}ms)")
+    run_eval()

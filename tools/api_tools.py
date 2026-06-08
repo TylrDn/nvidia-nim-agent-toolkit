@@ -1,36 +1,30 @@
-"""REST API StructuredTool wrapper.
-
-Exposes HTTP GET/POST as a LangChain StructuredTool so the executor
-agent can call external APIs via tool-calling.
-"""
+"""Standalone HTTP tool wrappers importable outside the agent context."""
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
-from langchain_core.tools import tool
+from langchain.tools import StructuredTool
+from pydantic import BaseModel, Field
 
 
-@tool
-def api_request(url: str, method: str = "GET", payload: dict | None = None) -> str:
-    """Make an HTTP request to a REST API endpoint.
+class HTTPGetInput(BaseModel):
+    url: str = Field(..., description="Full URL to GET")
+    params: dict[str, str] = Field(default_factory=dict)
 
-    Args:
-        url: Full URL to request.
-        method: HTTP method — GET or POST.
-        payload: Optional JSON body for POST requests.
 
-    Returns:
-        Response body as a string (JSON or text).
-    """
-    # TODO: add auth header injection from config
+def http_get(url: str, params: dict[str, str] | None = None) -> dict[str, Any]:
     try:
-        if method.upper() == "POST":
-            resp = httpx.post(url, json=payload, timeout=30)
-        else:
-            resp = httpx.get(url, timeout=30)
-        resp.raise_for_status()
-        return resp.text
-    except httpx.HTTPError as exc:
-        return f"HTTP error: {exc}"
+        r = httpx.get(url, params=params or {}, timeout=15)
+        r.raise_for_status()
+        return {"status": r.status_code, "body": r.json()}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
 
 
-api_tool = api_request
+HTTP_GET_TOOL = StructuredTool.from_function(
+    func=http_get,
+    name="http_get",
+    description="Perform a GET request and return JSON response.",
+    args_schema=HTTPGetInput,
+)

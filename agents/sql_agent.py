@@ -1,40 +1,56 @@
-"""Text-to-SQL agent (SQLAlchemy backend).
-
-Converts natural language queries to SQL, executes them against
-a configured database, and returns structured results.
-"""
+"""Text-to-SQL agent backed by SQLAlchemy."""
 from __future__ import annotations
 
-import logging
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.prompts import ChatPromptTemplate
-from nim.client import get_default_llm
-from tools.sql_tools import sql_tool
+import os
+from typing import Any
 
-logger = logging.getLogger(__name__)
+from langchain.tools import StructuredTool
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
+from sqlalchemy import create_engine, text
 
-SYSTEM_PROMPT = """You are a SQL agent. Convert the user's question into a
-SQL query, execute it, and return the results in a clear format.
-Never execute DROP, DELETE, or TRUNCATE statements."""
+from nim.client import NIMClient
+
+_DB_URL = os.getenv("DATABASE_URL", "sqlite:///./demo.db")
+_engine = create_engine(_DB_URL)
 
 
-def run_sql_agent(question: str) -> str:
-    """Convert a natural language question to SQL and execute it.
+class SQLQueryInput(BaseModel):
+    query: str = Field(..., description="A read-only SQL SELECT statement")
 
-    Args:
-        question: Natural language question about the database.
 
-    Returns:
-        Query results as a formatted string.
-    """
-    # TODO: add schema injection so the LLM knows table structures
-    llm = get_default_llm()
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        ("human", "{input}"),
-        ("placeholder", "{agent_scratchpad}"),
-    ])
-    agent = create_tool_calling_agent(llm, [sql_tool], prompt)
-    executor = AgentExecutor(agent=agent, tools=[sql_tool], verbose=True)
-    result = executor.invoke({"input": question})
-    return result["output"]
+def _run_sql(query: str) -> dict[str, Any]:
+    if not query.strip().upper().startswith("SELECT"):
+        return {"error": "Only SELECT queries are permitted."}
+    try:
+        with _engine.connect() as conn:
+            rows = conn.execute(text(query)).fetchall()
+            return {"rows": [dict(r._mapping) for r in rows]}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+_sql_tool = StructuredTool.from_function(
+    func=_run_sql,
+    name="sql_query",
+    description="Execute a read-only SQL SELECT query and return the results.",
+    args_schema=SQLQueryInput,
+)
+
+_llm = NIMClient().get_llm().bind_tools([_sql_tool])
+
+_SYSTEM = (
+    "You are a SQL agent. Translate the user's natural-language request into a "
+    "valid SQL SELECT query, execute it with the sql_query tool, and return the "
+    "results as structured JSON."
+)
+
+
+def run(task_description: str) -> dict[str, Any]:
+    """Execute the SQL agent for a single task."""
+    messages = [
+        SystemMessage(content=_SYSTEM),
+        HumanMessage(content=task_description),
+    ]
+    response = _llm.invoke(messages)
+    return {"output": response.content, "tool": "sql"}

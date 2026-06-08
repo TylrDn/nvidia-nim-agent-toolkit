@@ -1,55 +1,62 @@
-"""LangGraph StateGraph — multi-agent coordinator.
-
-Wires together: Planner → Executor → Reviewer with conditional retry loop.
-
-Usage::
-
-    from orchestrator.graph import build_graph
-    graph = build_graph()
-    result = graph.invoke({"user_input": "Summarise our Q2 sales data"})
-"""
+"""LangGraph StateGraph — multi-agent coordinator (Planner → Executor → Reviewer)."""
 from __future__ import annotations
 
-from langgraph.graph import StateGraph, END
-from orchestrator.state import AgentState
-from orchestrator.nodes.planner import planner_node
+from langchain_core.messages import AIMessage
+from langgraph.graph import END, StateGraph
+
 from orchestrator.nodes.executor import executor_node
-from orchestrator.nodes.reviewer import reviewer_node
+from orchestrator.nodes.planner import planner_node
+from orchestrator.nodes.reviewer import reviewer_node, should_retry
+from orchestrator.state import AgentState
 
-MAX_RETRIES = 3
-REVIEWER_PASS_THRESHOLD = 0.7
+
+def _advance_task(state: AgentState) -> AgentState:
+    """Move to the next task; reset retry counter."""
+    return {**state, "current_task_idx": state["current_task_idx"] + 1,
+            "retry_count": 0}
 
 
-def _should_retry(state: AgentState) -> str:
-    """Conditional edge: retry if reviewer score low and retries remain."""
-    if state["reviewer_score"] >= REVIEWER_PASS_THRESHOLD:
-        return "done"
-    if state["retry_count"] >= MAX_RETRIES:
-        return "done"  # fail-open after max retries
-    return "retry"
+def _increment_retry(state: AgentState) -> AgentState:
+    """Increment retry counter without advancing task."""
+    return {**state, "retry_count": state.get("retry_count", 0) + 1}
+
+
+def _finalize(state: AgentState) -> AgentState:
+    """Compose the final answer from all collected results."""
+    summary = "\n".join(
+        f"Task {r['task_id']}: {r['result'].get('output', str(r['result']))}"
+        for r in state["results"]
+    )
+    final = AIMessage(content=summary)
+    return {**state, "final_answer": summary,
+            "messages": state["messages"] + [final]}
 
 
 def build_graph() -> StateGraph:
-    """Assemble and compile the multi-agent LangGraph.
+    """Assemble and compile the multi-agent StateGraph."""
+    g = StateGraph(AgentState)
 
-    Returns:
-        Compiled LangGraph ready for .invoke() or .stream().
-    """
-    builder = StateGraph(AgentState)
+    g.add_node("planner", planner_node)
+    g.add_node("executor", executor_node)
+    g.add_node("reviewer", reviewer_node)
+    g.add_node("advance", _advance_task)
+    g.add_node("retry", _increment_retry)
+    g.add_node("finalize", _finalize)
 
-    # Register nodes
-    builder.add_node("planner", planner_node)
-    builder.add_node("executor", executor_node)
-    builder.add_node("reviewer", reviewer_node)
-
-    # Edges
-    builder.set_entry_point("planner")
-    builder.add_edge("planner", "executor")
-    builder.add_edge("executor", "reviewer")
-    builder.add_conditional_edges(
+    g.set_entry_point("planner")
+    g.add_edge("planner", "executor")
+    g.add_edge("executor", "reviewer")
+    g.add_conditional_edges(
         "reviewer",
-        _should_retry,
-        {"retry": "executor", "done": END},
+        should_retry,
+        {"retry": "retry", "advance": "advance", "done": "finalize"},
     )
+    g.add_edge("retry", "executor")
+    g.add_edge("advance", "executor")
+    g.add_edge("finalize", END)
 
-    return builder.compile()
+    return g.compile()
+
+
+# Singleton compiled graph — import and call `.invoke()` directly
+graph = build_graph()

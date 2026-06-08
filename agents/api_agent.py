@@ -1,42 +1,52 @@
-"""REST API tool-calling agent.
-
-A LangChain tool-calling agent that queries external REST APIs on behalf
-of the orchestrator. Wraps raw HTTP calls as structured LangChain tools.
-"""
+"""REST API tool-calling agent."""
 from __future__ import annotations
 
-import logging
+import os
 from typing import Any
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.prompts import ChatPromptTemplate
-from nim.client import get_default_llm
-from tools.api_tools import api_tool
+import httpx
+from langchain.tools import StructuredTool
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
 
-logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """You are an API agent. Use the api_request tool to fetch
-data from REST APIs. Always validate the response before returning."""
+from nim.client import NIMClient
 
 
-def run_api_agent(task: str, context: dict[str, Any] | None = None) -> str:
-    """Run the API agent for a given task.
+class APIQueryInput(BaseModel):
+    url: str = Field(..., description="Full URL to GET")
+    params: dict[str, str] = Field(default_factory=dict,
+                                   description="Query parameters")
 
-    Args:
-        task: Natural language description of the API call to make.
-        context: Optional dict of additional context (base_url, headers, etc.).
 
-    Returns:
-        String result from the API call.
-    """
-    # TODO: inject context into tool config dynamically
-    llm = get_default_llm()
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        ("human", "{input}"),
-        ("placeholder", "{agent_scratchpad}"),
-    ])
-    agent = create_tool_calling_agent(llm, [api_tool], prompt)
-    executor = AgentExecutor(agent=agent, tools=[api_tool], verbose=True)
-    result = executor.invoke({"input": task})
-    return result["output"]
+def _http_get(url: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+    try:
+        resp = httpx.get(url, params=params or {}, timeout=15)
+        resp.raise_for_status()
+        return {"status": resp.status_code, "body": resp.json()}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+_api_tool = StructuredTool.from_function(
+    func=_http_get,
+    name="http_get",
+    description="Perform an HTTP GET request and return the JSON response.",
+    args_schema=APIQueryInput,
+)
+
+_llm = NIMClient().get_llm().bind_tools([_api_tool])
+
+_SYSTEM = (
+    "You are an API agent. Use the http_get tool to answer the user's request. "
+    "Always return structured JSON in your final answer."
+)
+
+
+def run(task_description: str) -> dict[str, Any]:
+    """Execute the API agent for a single task."""
+    messages = [
+        SystemMessage(content=_SYSTEM),
+        HumanMessage(content=task_description),
+    ]
+    response = _llm.invoke(messages)
+    return {"output": response.content, "tool": "api"}

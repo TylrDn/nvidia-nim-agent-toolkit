@@ -1,38 +1,35 @@
-"""Unit tests for NIMClient."""
+"""Unit tests for NIM client — mocks the NIM endpoint."""
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from nim.client import NIMClient
+
+from nim.client import NIMClient, NIMConfig
 
 
-def test_nim_client_init_from_env(monkeypatch):
-    monkeypatch.setenv("NIM_API_KEY", "test-key")
-    monkeypatch.setenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
-    monkeypatch.setenv("NIM_MODEL", "meta/llama-3.1-70b-instruct")
-    client = NIMClient()
-    assert client.api_key == "test-key"
-    assert client.model == "meta/llama-3.1-70b-instruct"
-
-
-def test_nim_client_override_params():
-    client = NIMClient(
-        model="mistralai/mistral-7b-instruct-v0.3",
-        base_url="https://custom.nim.endpoint/v1",
-        api_key="custom-key",
-    )
-    assert client.model == "mistralai/mistral-7b-instruct-v0.3"
-    assert client.base_url == "https://custom.nim.endpoint/v1"
-
-
-@patch("nim.client.ChatOpenAI")
-def test_get_llm_returns_chat_openai(mock_chat):
-    mock_chat.return_value = MagicMock()
-    client = NIMClient(
-        model="meta/llama-3.1-8b-instruct",
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key="test",
-    )
+def test_get_llm_returns_chat_openai() -> None:
+    from langchain_openai import ChatOpenAI
+    client = NIMClient(NIMConfig(base_url="http://localhost:8000/v1",
+                                 api_key="test", model="test-model"))
     llm = client.get_llm()
-    mock_chat.assert_called_once()
-    assert llm is not None
+    assert isinstance(llm, ChatOpenAI)
+
+
+@patch("httpx.get")
+def test_health_check_ok(mock_get: MagicMock) -> None:
+    mock_get.return_value = MagicMock(status_code=200)
+    client = NIMClient(NIMConfig(base_url="http://localhost:8000/v1",
+                                 api_key="test", model="test-model"))
+    result = client.health_check()
+    assert result["status"] == "ok"
+
+
+@patch("httpx.get", side_effect=Exception("conn refused"))
+def test_health_check_unreachable(mock_get: MagicMock) -> None:
+    import httpx
+    mock_get.side_effect = httpx.ConnectError("refused")
+    client = NIMClient(NIMConfig(base_url="http://localhost:8000/v1",
+                                 api_key="test", model="test-model"))
+    result = client.health_check()
+    assert result["status"] == "unreachable"

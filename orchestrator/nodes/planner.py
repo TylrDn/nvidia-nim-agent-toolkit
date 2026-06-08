@@ -1,47 +1,43 @@
-"""Planner node — decomposes user intent into ordered subtasks.
-
-Receives the user_input from AgentState, calls NIM to produce
-a numbered task list, and writes it back to state.plan.
-"""
+"""Planner node — decomposes user intent into an ordered task list."""
 from __future__ import annotations
 
-import logging
+import json
+
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from nim.client import NIMClient
 from orchestrator.state import AgentState
-from nim.client import get_default_llm
 
-logger = logging.getLogger(__name__)
+_SYSTEM_PROMPT = """\
+You are a task-planning agent. Given a user request, decompose it into a
+ordered JSON array of atomic subtasks.
 
-SYSTEM_PROMPT = """You are a task planning agent. Given a user request, decompose it
-into a concise ordered list of actionable subtasks. Return ONLY a numbered list,
-one task per line. Be specific and tool-oriented."""
+Return ONLY valid JSON — an array of objects, each with:
+  {"id": <int>, "description": <str>, "tool": "api" | "sql" | "doc" | "none"}
+
+Do not include any markdown fences or explanatory text outside the JSON.
+"""
+
+_llm = NIMClient().get_llm()
 
 
-def planner_node(state: AgentState) -> dict:
-    """LangGraph node: generate a task plan from user_input.
-
-    Args:
-        state: Current AgentState with user_input populated.
-
-    Returns:
-        Partial state update with ``plan`` and reset ``current_task``.
-    """
-    logger.info("Planner: decomposing task for input: %s", state["user_input"][:80])
-    llm = get_default_llm()
-
+def planner_node(state: AgentState) -> AgentState:
+    """Break the user request into subtasks; write to state['tasks']."""
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": state["user_input"]},
+        SystemMessage(content=_SYSTEM_PROMPT),
+        HumanMessage(content=state["user_request"]),
     ]
+    response = _llm.invoke(messages)
+    try:
+        tasks = json.loads(response.content)
+    except json.JSONDecodeError:
+        tasks = [{"id": 0, "description": state["user_request"], "tool": "none"}]
 
-    response = llm.invoke(messages)
-    raw_plan = response.content
-
-    # Parse numbered list into clean task strings
-    tasks = [
-        line.split(".", 1)[-1].strip()
-        for line in raw_plan.strip().splitlines()
-        if line.strip() and line[0].isdigit()
-    ]
-
-    logger.info("Planner: generated %d tasks", len(tasks))
-    return {"plan": tasks, "current_task": 0, "retry_count": 0}
+    return {
+        **state,
+        "tasks": tasks,
+        "current_task_idx": 0,
+        "results": [],
+        "retry_count": 0,
+        "messages": state["messages"] + [response],
+    }

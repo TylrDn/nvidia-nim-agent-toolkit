@@ -1,36 +1,23 @@
-# NIM Model Endpoint Configurations
-# Reference: https://docs.api.nvidia.com/nim/reference/llm-apis
+# NIM model endpoint configurations
+# Swap the active model without touching Python code.
+
+default_model: meta/llama-3.1-8b-instruct
 
 models:
-  default: meta/llama-3.1-70b-instruct
+  llama3_8b:
+    id: meta/llama-3.1-8b-instruct
+    endpoint: ${NIM_BASE_URL}
+    max_tokens: 2048
+    temperature: 0.0
 
-  available:
-    - id: meta/llama-3.1-70b-instruct
-      context_length: 128000
-      supports_tools: true
-      use_case: general_agent
+  llama3_70b:
+    id: meta/llama-3.1-70b-instruct
+    endpoint: ${NIM_BASE_URL}
+    max_tokens: 4096
+    temperature: 0.0
 
-    - id: meta/llama-3.1-8b-instruct
-      context_length: 128000
-      supports_tools: true
-      use_case: fast_agent
-
-    - id: mistralai/mistral-7b-instruct-v0.3
-      context_length: 32768
-      supports_tools: true
-      use_case: lightweight
-
-    - id: nvidia/nemotron-4-340b-instruct
-      context_length: 4096
-      supports_tools: false
-      use_case: reasoning
-
-    - id: nv-embedqa-e5-v5
-      context_length: 512
-      supports_tools: false
-      use_case: embeddings
-
-endpoints:
-  base_url: https://integrate.api.nvidia.com/v1
-  timeout_seconds: 60
-  max_retries: 3
+  mistral_7b:
+    id: mistralai/mistral-7b-instruct-v0.3
+    endpoint: ${NIM_BASE_URL}
+    max_tokens: 2048
+    temperature: 0.0
