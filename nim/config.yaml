@@ -1,51 +1,42 @@
-# NIM model endpoint configurations.
-# All models are accessed via the NIM OpenAI-compatible API.
-# Set NIM_BASE_URL to point at a self-hosted NIM instance for on-prem deployments.
+# NIM model endpoint configuration
+# Swap model IDs here without touching Python code
 
 default_model: meta/llama-3.1-70b-instruct
 
 models:
   llama3_70b:
     id: meta/llama-3.1-70b-instruct
-    display_name: "Llama 3.1 70B Instruct"
-    temperature: 0.0
-    max_tokens: 2048
-    timeout: 60
-    streaming: false
-    use_case: orchestrator
+    context_length: 128000
+    supports_tools: true
+    recommended_for: [planner, reviewer, sql_agent]
 
   llama3_8b:
     id: meta/llama-3.1-8b-instruct
-    display_name: "Llama 3.1 8B Instruct"
-    temperature: 0.0
-    max_tokens: 1024
-    timeout: 30
-    streaming: false
-    use_case: tool_agent
+    context_length: 128000
+    supports_tools: true
+    recommended_for: [executor, doc_agent]
 
-  mistral_7b:
-    id: mistralai/mistral-7b-instruct-v0.3
-    display_name: "Mistral 7B Instruct"
-    temperature: 0.1
-    max_tokens: 1024
-    timeout: 30
-    streaming: false
-    use_case: tool_agent
+  mistral_nemo:
+    id: mistralai/mistral-nemo-12b-instruct
+    context_length: 128000
+    supports_tools: true
+    recommended_for: [api_agent]
 
-  mixtral_8x7b:
-    id: mistralai/mixtral-8x7b-instruct-v0.1
-    display_name: "Mixtral 8x7B Instruct"
-    temperature: 0.0
-    max_tokens: 2048
-    timeout: 60
-    streaming: true
-    use_case: streaming
+  mixtral:
+    id: mistralai/mixtral-8x22b-instruct-v0.1
+    context_length: 64000
+    supports_tools: false
+    recommended_for: [summarization]
 
-  nemotron_70b:
-    id: nvidia/nemotron-4-340b-instruct
-    display_name: "NVIDIA Nemotron 340B"
-    temperature: 0.0
-    max_tokens: 4096
-    timeout: 120
-    streaming: false
-    use_case: high_quality
+  embedding:
+    id: nvidia/nv-embedqa-e5-v5
+    type: embedding
+    dimensions: 1024
+
+  reranker:
+    id: nvidia/nv-rerankqa-mistral-4b-v3
+    type: reranker
+
+endpoints:
+  nim_cloud: https://integrate.api.nvidia.com/v1
+  nim_local: http://localhost:8000/v1
