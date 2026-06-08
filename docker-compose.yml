@@ -1,0 +1,52 @@
+version: "3.9"
+services:
+  nim:
+    image: nvcr.io/nim/meta/llama-3.1-8b-instruct:latest
+    container_name: nim-llama3
+    ports:
+      - "8000:8000"
+    environment:
+      - NGC_API_KEY=${NGC_API_KEY}
+      - NIM_MODEL_NAME=meta/llama-3.1-8b-instruct
+    volumes:
+      - nim-cache:/root/.cache/nim
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    container_name: nim-agent-orchestrator
+    ports:
+      - "8080:8080"
+    environment:
+      - NIM_BASE_URL=http://nim:8000/v1
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-https://cloud.langfuse.com}
+    depends_on:
+      nim:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  nim-cache:
