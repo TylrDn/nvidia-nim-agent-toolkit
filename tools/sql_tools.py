@@ -1,94 +1,71 @@
-"""SQL tool wrappers as LangChain StructuredTools.
-
-Provides schema inspection and SELECT-only query execution via
-SQLAlchemy. Configure the target database via DATABASE_URL env var.
-"""
+"""SQL StructuredTool wrappers for the SQL agent."""
 from __future__ import annotations
 
 import os
-import logging
 from typing import Optional
 
 from langchain.tools import StructuredTool
 from pydantic import BaseModel, Field
+from sqlalchemy import create_engine, inspect, text
 
-logger = logging.getLogger(__name__)
+DB_URL = os.getenv("DATABASE_URL", "sqlite:///./demo.db")
+_engine = None
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./demo.db")
 
-
-class SchemaInput(BaseModel):
-    table_name: Optional[str] = Field(
-        default=None,
-        description="Table name to inspect. Leave blank to list all tables.",
-    )
+def _get_engine():
+    global _engine
+    if _engine is None:
+        _engine = create_engine(DB_URL)
+    return _engine
 
 
 class QueryInput(BaseModel):
-    query: str = Field(description="Valid SELECT SQL query to execute")
-    max_rows: int = Field(default=50, description="Maximum rows to return")
+    sql: str = Field(description="SQL SELECT statement to execute")
 
 
-def get_schema(table_name: Optional[str] = None) -> str:
-    """Return schema info for a table or list all tables."""
+class TableInput(BaseModel):
+    table_name: Optional[str] = Field(default=None, description="Table name to describe; omit to list all tables")
+
+
+def _run_query(sql: str) -> str:
     try:
-        from sqlalchemy import create_engine, inspect, text
-
-        engine = create_engine(DATABASE_URL)
-        inspector = inspect(engine)
-
-        if table_name:
-            columns = inspector.get_columns(table_name)
-            pk = inspector.get_pk_constraint(table_name)
-            fks = inspector.get_foreign_keys(table_name)
-            lines = [f"Table: {table_name}"]
-            lines += [f"  {c['name']} {c['type']} {'(PK)' if c['name'] in pk.get('constrained_columns', []) else ''}" for c in columns]
-            if fks:
-                lines += [f"  FK: {fk['constrained_columns']} -> {fk['referred_table']}.{fk['referred_columns']}" for fk in fks]
-            return "\n".join(lines)
-        else:
-            tables = inspector.get_table_names()
-            return "Available tables: " + ", ".join(tables) if tables else "No tables found."
-    except Exception as exc:  # noqa: BLE001
-        return f"Schema error: {exc}"
-
-
-def execute_query(query: str, max_rows: int = 50) -> str:
-    """Execute a SELECT query and return formatted results."""
-    q = query.strip().upper()
-    if not q.startswith("SELECT"):
-        return "Error: only SELECT queries are permitted."
-    try:
-        from sqlalchemy import create_engine, text
-
-        engine = create_engine(DATABASE_URL)
+        engine = _get_engine()
         with engine.connect() as conn:
-            result = conn.execute(text(query))
-            rows = result.fetchmany(max_rows)
-            if not rows:
-                return "Query returned no results."
+            result = conn.execute(text(sql))
+            rows = result.fetchmany(100)
             cols = list(result.keys())
-            header = " | ".join(cols)
-            sep = "-" * len(header)
-            body = "\n".join(" | ".join(str(v) for v in row) for row in rows)
-            return f"{header}\n{sep}\n{body}"
-    except Exception as exc:  # noqa: BLE001
-        return f"Query error: {exc}"
+            lines = ["\t".join(cols)]
+            lines += ["\t".join(str(v) for v in row) for row in rows]
+            return "\n".join(lines)
+    except Exception as e:
+        return f"SQL error: {e}"
 
 
-def get_sql_tools() -> list[StructuredTool]:
-    """Return the list of SQL StructuredTools for agent use."""
+def _describe_table(table_name: str | None = None) -> str:
+    try:
+        engine = _get_engine()
+        insp = inspect(engine)
+        if table_name:
+            cols = insp.get_columns(table_name)
+            return "\n".join(f"{c['name']} {c['type']}" for c in cols)
+        else:
+            return "\n".join(insp.get_table_names())
+    except Exception as e:
+        return f"Schema error: {e}"
+
+
+def get_sql_tools() -> list:
     return [
         StructuredTool.from_function(
-            func=get_schema,
-            name="get_db_schema",
-            description="Inspect database schema. Pass a table name or leave blank to list all tables.",
-            args_schema=SchemaInput,
+            func=_run_query,
+            name="sql_query",
+            description="Execute a SQL SELECT query. Returns up to 100 rows as tab-separated text.",
+            args_schema=QueryInput,
         ),
         StructuredTool.from_function(
-            func=execute_query,
-            name="execute_sql",
-            description="Execute a SELECT SQL query and return tabular results. No data modification allowed.",
-            args_schema=QueryInput,
+            func=_describe_table,
+            name="sql_describe",
+            description="List all tables or describe columns of a specific table.",
+            args_schema=TableInput,
         ),
     ]

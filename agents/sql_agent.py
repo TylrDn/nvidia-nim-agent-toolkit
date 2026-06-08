@@ -1,63 +1,48 @@
-"""Text-to-SQL agent with SQLAlchemy backend.
-
-Translates natural-language questions into SQL, executes them against
-a configured database, and returns formatted results.
-"""
+"""Text-to-SQL agent backed by NIM + SQLAlchemy."""
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-from nim.client import NIMClient
+from nim.client import get_client
 from tools.sql_tools import get_sql_tools
 
-logger = logging.getLogger(__name__)
 
-SQL_AGENT_SYSTEM = """\
-You are a SQL expert. Use the provided tools to answer questions about data.
-1. First use the schema tool to understand available tables.
-2. Then construct and execute a precise SQL query.
-3. Return results in a clear, readable format.
-Never modify data — only SELECT queries are permitted.
+SYSTEM = """\
+You are a SQL specialist agent. Translate the user's natural language request
+into SQL queries, execute them using the available tools, and return the results
+as structured data or a clear summary.
+Never guess schema — always introspect the database first.
 """
 
 
-class SqlAgent:
-    """LangChain tool-calling agent backed by SQL query tools."""
+class SQLAgent:
+    """LangChain OpenAI-tools agent for text-to-SQL via NIM."""
 
-    def __init__(self, client: NIMClient | None = None) -> None:
-        self.client = client or NIMClient()
-        self._executor: AgentExecutor | None = None
+    def __init__(self) -> None:
+        self.llm = get_client().as_langchain_llm()
+        self.tools = get_sql_tools()
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", SYSTEM),
+            MessagesPlaceholder("chat_history", optional=True),
+            ("human", "{input}"),
+            MessagesPlaceholder("agent_scratchpad"),
+        ])
+        agent = create_openai_tools_agent(self.llm, self.tools, prompt)
+        self.executor = AgentExecutor(agent=agent, tools=self.tools, verbose=True, max_iterations=5)
 
-    @property
-    def executor(self) -> AgentExecutor:
-        if self._executor is None:
-            tools = get_sql_tools()
-            prompt = ChatPromptTemplate.from_messages(
-                [
-                    ("system", SQL_AGENT_SYSTEM),
-                    ("human", "{input}"),
-                    MessagesPlaceholder(variable_name="agent_scratchpad"),
-                ]
-            )
-            agent = create_tool_calling_agent(self.client.llm, tools, prompt)
-            self._executor = AgentExecutor(
-                agent=agent,
-                tools=tools,
-                max_iterations=6,
-                verbose=False,
-            )
-        return self._executor
+    def run(self, query: str, **kwargs: Any) -> str:
+        result = self.executor.invoke({"input": query})
+        return result.get("output", "")
 
-    def run(self, task: str) -> str:
-        """Execute a natural-language SQL task and return the result."""
-        logger.info("SqlAgent executing: %s", task)
-        try:
-            result = self.executor.invoke({"input": task})
-            return str(result.get("output", ""))
-        except Exception as exc:  # noqa: BLE001
-            logger.error("SqlAgent error: %s", exc)
-            return f"SQL agent error: {exc}"
+
+_instance: SQLAgent | None = None
+
+
+def run(query: str, state: Any = None) -> str:
+    global _instance
+    if _instance is None:
+        _instance = SQLAgent()
+    return _instance.run(query)

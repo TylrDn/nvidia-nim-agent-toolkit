@@ -1,4 +1,3 @@
-"""Tools package."""
 from tools.api_tools import get_api_tools
 from tools.sql_tools import get_sql_tools
 from tools.doc_tools import get_doc_tools

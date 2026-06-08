@@ -1,6 +1,5 @@
-"""Agent package."""
-from agents.api_agent import ApiAgent
-from agents.sql_agent import SqlAgent
+from agents.api_agent import APIAgent
+from agents.sql_agent import SQLAgent
 from agents.doc_agent import DocAgent
 
-__all__ = ["ApiAgent", "SqlAgent", "DocAgent"]
+__all__ = ["APIAgent", "SQLAgent", "DocAgent"]
