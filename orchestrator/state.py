@@ -1,8 +1,4 @@
-"""LangGraph agent state schema.
-
-All nodes in the multi-agent graph read from and write to this shared
-TypedDict state. Keeping the schema in one place prevents drift.
-"""
+"""TypedDict agent state schema for the NIM multi-agent LangGraph."""
 from __future__ import annotations
 
 from typing import Annotated, Any
@@ -13,31 +9,34 @@ from langgraph.graph.message import add_messages
 
 
 class AgentState(TypedDict):
-    """Top-level state object shared across all graph nodes."""
+    """Shared state passed between all nodes in the LangGraph StateGraph."""
 
-    # Conversation history — add_messages merges incoming messages.
+    # Conversation message history — appended, never replaced
     messages: Annotated[list[BaseMessage], add_messages]
 
-    # Original user intent, preserved across the full planning loop.
-    user_intent: str
+    # Original user query (immutable)
+    user_query: str
 
-    # Ordered task list produced by the Planner node.
+    # Planner output — ordered list of subtasks
     task_list: list[dict[str, Any]]
 
-    # Index of the task currently being executed.
+    # Index of the currently executing task
     current_task_index: int
 
-    # Accumulated results from all completed tasks.
+    # Accumulated results from completed tasks
     task_results: list[dict[str, Any]]
 
-    # Reviewer score for the most recent Executor output (0.0 – 1.0).
-    reviewer_score: float
-
-    # Number of retry attempts for the current task.
-    retry_count: int
-
-    # Final synthesised answer, populated on terminal node.
+    # Final synthesized answer (set by reviewer on completion)
     final_answer: str
 
-    # Arbitrary metadata (trace IDs, timing, model used, etc.)
+    # Reviewer score for the last executor output (0.0 – 1.0)
+    reviewer_score: float
+
+    # Number of retry attempts for the current task
+    retry_count: int
+
+    # Which agent/node should handle execution (set by planner)
+    routing_key: str
+
+    # Arbitrary metadata passthrough
     metadata: dict[str, Any]
