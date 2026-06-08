@@ -1,0 +1,201 @@
+# nvidia-nim-agent-toolkit — Cursor Rules
+
+## Project Identity
+
+`nvidia-nim-agent-toolkit` is the foundational NVIDIA Solutions Architect (SA) reference implementation for building production multi-agent LLM systems on NVIDIA NIM. It demonstrates how to wrap NIM's OpenAI-compatible inference API in a clean Python client, orchestrate multi-step reasoning with LangGraph, and structure agents as reusable StructuredTool components configured via YAML. This repo is the upstream pattern library that `enterprise-rag-pipeline` and `multi-agent-reference-architecture` derive their conventions from.
+
+## Tech Stack
+
+| Component | Package / Version |
+|---|---|
+| Python | 3.11 |
+| Orchestration | langgraph ≥ 0.2 |
+| LLM framework | langchain-core, langchain-openai |
+| NIM client | openai (OpenAI-compat), tenacity |
+| Config | PyYAML, python-dotenv |
+| Observability | langfuse ≥ 2.x |
+| Eval | pytest, pytest-asyncio |
+| Linting | ruff, mypy |
+| Packaging | pyproject.toml (no setup.py) |
+
+Never add `torch`, `transformers`, or any ML training dependencies — this repo is inference-only.
+
+## Coding Conventions
+
+### General
+- All functions and methods **must** have type hints on every argument and the return type. No bare `Any` unless explicitly justified with a comment.
+- All public functions, classes, and methods **must** have Google-style docstrings with `Args:`, `Returns:`, and `Raises:` sections.
+- Never use `print()`. All logging must go through `import logging; logger = logging.getLogger(__name__)`. Use `logger.debug`, `logger.info`, `logger.warning`, `logger.error`.
+- Use `python-dotenv` (`from dotenv import load_dotenv`) in every entry-point module. Never hard-code secrets or base URLs.
+- Constants belong in module-level `ALL_CAPS` variables or `configs/agents.yaml`. Never bury magic strings inside functions.
+- Line length: 100 characters (configured in `pyproject.toml` under `[tool.ruff]`).
+- Imports: standard library → third-party → local, separated by blank lines. Use `ruff --fix` before committing.
+
+### Error Handling
+- Use `tenacity.retry` with `stop=stop_after_attempt(3)` and `wait=wait_exponential(multiplier=1, min=2, max=10)` on all NIM API calls.
+- Never swallow exceptions silently. Always log the exception before re-raising or returning a graceful error state.
+- Use custom exception classes defined in `nim/client.py` (`NIMClientError`, `NIMRateLimitError`) rather than bare `Exception`.
+
+### Async
+- Prefer `async def` for all I/O-bound operations. Use `asyncio.gather` for parallelism.
+- Do not mix sync and async in the same call stack without explicit `asyncio.run()` isolation at the entry point.
+
+## LangGraph Patterns
+
+### State
+- All graph state **must** be a `TypedDict` defined in its own file (e.g., `orchestrator/state.py`). Never use plain `dict`.
+- State fields should use `Annotated[list[...], operator.add]` for append-only lists (message history, tool results). Use plain field for single-value state.
+- Example canonical state shape:
+  ```python
+  from typing import Annotated, TypedDict
+  import operator
+
+  class AgentState(TypedDict):
+      messages: Annotated[list[BaseMessage], operator.add]
+      plan: str
+      tool_results: Annotated[list[dict], operator.add]
+      final_answer: str
+      error: str | None
+  ```
+
+### Graph Construction
+- Define all nodes as standalone `async def node_name(state: AgentState) -> dict:` functions in `orchestrator/nodes/`.
+- Each node returns a **partial state dict** — only the keys it modifies.
+- Conditional edges must use a named router function, not a lambda.
+- Compile the graph once and reuse the compiled object. Never recompile per-request.
+- Node naming convention: snake_case verbs — `plan_task`, `execute_tool`, `review_output`, `route_decision`.
+
+### Planner → Executor → Reviewer Loop
+- The canonical loop in this repo is `planner_node → executor_node → reviewer_node → (loop back or END)`.
+- The reviewer node decides loop continuation via a `should_continue` router that inspects `state["error"]` and iteration count stored in state.
+- Maximum loop iterations must be capped (default 5) to prevent infinite loops. Store `iteration: int` in state.
+
+## NIM / LangChain Patterns
+
+### NIMClient
+- `nim/client.py` exports a singleton `NIMClient` that wraps `openai.AsyncOpenAI` pointed at the NIM base URL.
+- Always read `NIM_BASE_URL` and `NIM_API_KEY` from environment. Never accept these as function arguments.
+- `NIMClient.chat_completion()` is the canonical entrypoint for all LLM calls. It must accept a `callbacks: list` parameter and pass it to the underlying `langchain_openai.ChatOpenAI` invocation.
+- The model name must come from `configs/agents.yaml`, never hardcoded.
+
+### ChatOpenAI Construction
+```python
+from langchain_openai import ChatOpenAI
+from langfuse.callback import CallbackHandler
+
+langfuse_handler = CallbackHandler()
+
+llm = ChatOpenAI(
+    model=agent_config["model"],
+    base_url=os.environ["NIM_BASE_URL"],
+    api_key=os.environ["NIM_API_KEY"],
+    temperature=0,
+    callbacks=[langfuse_handler],
+)
+```
+Always pass `callbacks=[langfuse_handler]` — never construct a `ChatOpenAI` instance without it.
+
+### StructuredTool Wrappers
+- All agent capabilities are exposed as `langchain.tools.StructuredTool` instances defined in `agents/`.
+- Tool schemas must use `pydantic.BaseModel` input models. Never use bare `dict` args.
+- Tool names follow `verb_noun` convention: `query_database`, `fetch_document`, `call_api`.
+
+### agents.yaml
+- Every agent persona is defined in `configs/agents.yaml` with fields: `name`, `model`, `system_prompt`, `tools`, `max_iterations`.
+- Load config at startup with `yaml.safe_load`. Validate required fields explicitly after loading.
+
+## Observability Standard
+
+**Every LLM call in this repository must have Langfuse tracing enabled.**
+
+```python
+import os
+from langfuse.callback import CallbackHandler
+
+def get_langfuse_handler() -> CallbackHandler:
+    """Return a configured Langfuse callback handler.
+
+    Reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST from env.
+    Falls back gracefully (logs warning) if keys are missing.
+    """
+    return CallbackHandler(
+        public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
+        secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
+        host=os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com"),
+    )
+```
+
+- Import `get_langfuse_handler` from `nim/client.py` — do not duplicate this factory.
+- Add `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` to `.env.template`.
+- Tracing must be present in: `nim/client.py`, `agents/api_agent.py`, `agents/sql_agent.py`, `agents/doc_agent.py`, all orchestrator node files.
+
+## Docker & Deployment
+
+- `docker-compose.yml` **must** exist at the **repo root** in addition to `deploy/docker-compose.yml`. The root file is the developer convenience entry point (`docker compose up`). The `deploy/` version is the production-parameterized file.
+- The root `docker-compose.yml` should use `env_file: .env` and reference images built from `deploy/Dockerfile`.
+- Never commit actual `.env` files. Only `.env.template` is tracked.
+
+## File & Module Organization
+
+```
+nvidia-nim-agent-toolkit/
+├── agents/          # StructuredTool wrappers (one per agent type)
+├── api/             # FastAPI server and route definitions
+├── configs/         # YAML configs (agents.yaml, etc.)
+├── deploy/          # Production Dockerfile + docker-compose
+├── docs/            # Architecture and integration docs
+├── evals/           # Evaluation scripts
+├── nim/             # NIM client, config loader, health check
+├── notebooks/       # Exploratory notebooks (not imported by src)
+├── orchestrator/    # LangGraph graph, state, nodes/
+│   └── nodes/       # planner.py, executor.py, reviewer.py
+├── tests/           # pytest test suite mirroring src structure
+├── .env.template    # Environment variable template
+├── .cursorrules     # This file
+├── docker-compose.yml  # Root convenience compose
+├── pyproject.toml
+└── requirements.txt
+```
+
+- No circular imports. `nim/` must not import from `agents/` or `orchestrator/`.
+- `orchestrator/` may import from `nim/`, `agents/`, `configs/`.
+- `api/` imports from `orchestrator/` only — never directly from `nim/` internals.
+- Test files mirror source: `tests/test_nim_client.py` tests `nim/client.py`.
+
+## What NOT to Do
+
+- **Do not** use `openai.OpenAI` (sync) client directly. Always use `openai.AsyncOpenAI` or `langchain_openai.ChatOpenAI`.
+- **Do not** hardcode model names (e.g., `"meta/llama-3.1-70b-instruct"`). Load from `agents.yaml`.
+- **Do not** use `langchain.agents.AgentExecutor` — use LangGraph graphs instead.
+- **Do not** import from `langchain` (deprecated namespace). Use `langchain_core`, `langchain_openai`, `langchain_community`.
+- **Do not** use `print()` for any debugging. Use structured logging.
+- **Do not** catch bare `except Exception` without logging and re-raising.
+- **Do not** skip the Langfuse callback when constructing any LLM or chain object.
+- **Do not** put business logic in `api/main.py` — it belongs in `orchestrator/` or `agents/`.
+- **Do not** use mutable default arguments in function signatures.
+- **Do not** define state as a plain `dict` — always use `TypedDict`.
+- **Do not** place a `docker-compose.yml` only in `deploy/` — always maintain a root-level copy.
+
+## Test Conventions
+
+- Test runner: `pytest` with `pytest-asyncio` for async tests.
+- All async test functions must be decorated with `@pytest.mark.asyncio`.
+- Use `pytest.fixture` for shared setup. Fixtures live in `tests/conftest.py`.
+- Mock NIM API calls with `unittest.mock.AsyncMock` or `pytest-mock`'s `mocker.patch`.
+- Mock Langfuse handler with `mocker.patch("langfuse.callback.CallbackHandler")` to avoid network calls in tests.
+- Test file naming: `test_<module_name>.py`. Test function naming: `test_<function>_<scenario>`.
+- Minimum coverage target: 80% for `nim/`, `orchestrator/`, `agents/`.
+- Use `pytest-cov` and add `--cov=. --cov-report=term-missing` to CI test command.
+- Integration tests that require a live NIM endpoint go in `tests/integration/` and are skipped by default (`@pytest.mark.integration`).
+
+## Cross-Repo Conventions
+
+These conventions are shared across `nvidia-nim-agent-toolkit`, `enterprise-rag-pipeline`, and `multi-agent-reference-architecture`:
+
+1. **dotenv**: Every entry point calls `load_dotenv()` before any config reads.
+2. **Linting**: `ruff check . --fix && mypy .` must pass clean before merging.
+3. **docker-compose at root**: All repos expose a root-level `docker-compose.yml` for `docker compose up`.
+4. **TypedDict state**: LangGraph state is always a `TypedDict`, never a plain dict.
+5. **Langfuse tracing**: Every LLM call includes `CallbackHandler` from `langfuse.callback`.
+6. **agents.yaml pattern**: Agent persona, model, and tool config lives in YAML, never hardcoded.
+7. **No legacy langchain imports**: Use `langchain_core`, `langchain_openai`, `langchain_community`.
