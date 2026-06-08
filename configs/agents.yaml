@@ -1,32 +1,72 @@
+# Agent persona and model configuration.
+# Swap personas and model endpoints without touching Python code.
+# All model ids must match entries in nim/config.yaml.
+
 agents:
-  planner:
-    model: meta/llama3-70b-instruct
+  orchestrator:
+    name: Orchestrator
+    description: "Top-level coordinator that routes between planner, executor, and reviewer."
+    model: meta/llama-3.1-70b-instruct
     temperature: 0.0
-    description: Decomposes user queries into ordered subtasks
+    max_tokens: 2048
+    system_prompt: >
+      You are a precise enterprise AI orchestrator. Decompose complex requests
+      into discrete tasks and coordinate specialist agents to complete them.
+      Always verify outputs before delivering a final answer.
+
+  planner:
+    name: Planner
+    description: "Decomposes user intent into ordered, atomic tasks."
+    model: meta/llama-3.1-70b-instruct
+    temperature: 0.0
+    max_tokens: 1024
+    system_prompt: >
+      You are a task planner. Break down complex goals into ordered steps.
+      Each step must be self-contained and executable by a single specialist tool.
 
   executor:
-    model: meta/llama3-70b-instruct
+    name: Executor
+    description: "Runs tool calls and synthesises results per task."
+    model: meta/llama-3.1-8b-instruct
     temperature: 0.0
-    description: Dispatches subtasks to specialist agents
+    max_tokens: 1024
+    system_prompt: >
+      You are a task executor. Complete the assigned task using the available tools.
+      Be precise and concise. Return only the relevant result.
 
   reviewer:
-    model: meta/llama3-70b-instruct
+    name: Reviewer
+    description: "Evaluates executor output quality and routes the pipeline."
+    model: meta/llama-3.1-70b-instruct
     temperature: 0.0
-    description: Scores results and decides to loop or terminate
-    pass_threshold: 0.8
-    max_loops: 3
+    max_tokens: 256
+    system_prompt: >
+      You are a quality reviewer. Score outputs strictly and fairly.
+      Only approve outputs that directly and completely address the task.
 
   api_agent:
-    model: meta/llama3-8b-instruct
+    name: API Specialist
+    description: "Handles REST API interactions."
+    model: meta/llama-3.1-8b-instruct
     temperature: 0.0
-    description: Handles REST API data fetching tasks
+    max_tokens: 1024
 
   sql_agent:
-    model: meta/llama3-70b-instruct
+    name: SQL Specialist
+    description: "Handles text-to-SQL queries."
+    model: meta/llama-3.1-8b-instruct
     temperature: 0.0
-    description: Handles text-to-SQL database queries
+    max_tokens: 1024
 
   doc_agent:
-    model: meta/llama3-70b-instruct
+    name: Document Specialist
+    description: "Handles document retrieval and grounded Q&A."
+    model: meta/llama-3.1-8b-instruct
     temperature: 0.0
-    description: Handles document store semantic retrieval
+    max_tokens: 1024
+
+pipeline:
+  max_retries: 3
+  reviewer_threshold: 0.65
+  langfuse_tracing: true
+  log_level: INFO

@@ -1,39 +1,43 @@
-"""LangGraph TypedDict state schema for the multi-agent coordinator."""
+"""LangGraph agent state schema.
+
+All nodes in the multi-agent graph read from and write to this shared
+TypedDict state. Keeping the schema in one place prevents drift.
+"""
 from __future__ import annotations
 
 from typing import Annotated, Any
 from typing_extensions import TypedDict
-import operator
 
-
-class SubTask(TypedDict):
-    task_id: str
-    description: str
-    agent: str  # "api" | "sql" | "doc"
-    status: str  # "pending" | "running" | "done" | "failed"
-    result: str | None
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 
 class AgentState(TypedDict):
-    """Shared state threaded through every node in the LangGraph."""
+    """Top-level state object shared across all graph nodes."""
 
-    # User input
-    user_query: str
-    session_id: str
+    # Conversation history — add_messages merges incoming messages.
+    messages: Annotated[list[BaseMessage], add_messages]
 
-    # Planner output
-    plan: list[SubTask]
+    # Original user intent, preserved across the full planning loop.
+    user_intent: str
+
+    # Ordered task list produced by the Planner node.
+    task_list: list[dict[str, Any]]
+
+    # Index of the task currently being executed.
     current_task_index: int
 
-    # Executor output — accumulated across tasks
-    task_results: Annotated[list[dict[str, Any]], operator.add]
+    # Accumulated results from all completed tasks.
+    task_results: list[dict[str, Any]]
 
-    # Reviewer output
-    reviewer_score: float  # 0.0 – 1.0
-    reviewer_feedback: str
-    loop_count: int
-    max_loops: int
+    # Reviewer score for the most recent Executor output (0.0 – 1.0).
+    reviewer_score: float
 
-    # Final answer
-    final_answer: str | None
-    error: str | None
+    # Number of retry attempts for the current task.
+    retry_count: int
+
+    # Final synthesised answer, populated on terminal node.
+    final_answer: str
+
+    # Arbitrary metadata (trace IDs, timing, model used, etc.)
+    metadata: dict[str, Any]

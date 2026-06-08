@@ -1,55 +1,71 @@
-# Architecture — nvidia-nim-agent-toolkit
+# Architecture — NVIDIA NIM Agent Toolkit
 
 ## Overview
 
-This toolkit implements a **Planner → Executor → Reviewer (PER)** multi-agent loop
-orchestrated by LangGraph, with NVIDIA NIM providing the inference backend.
+The toolkit implements a **Planner → Executor → Reviewer** (PER) multi-agent loop
+built on LangGraph, with all LLM inference routed through NVIDIA NIM microservices
+via the OpenAI-compatible REST API.
 
-## Agent Flow
+## Graph Topology
 
 ```mermaid
-graph TD
-    A([User Query]) --> B[Planner Node]
-    B --> C[Executor Node]
-    C --> D[Reviewer Node]
-    D -->|score < 0.8 and loops < max| C
-    D -->|score >= 0.8 or max loops| E([Final Answer])
+flowchart TD
+    A([START]) --> B[Planner]
+    B --> C[Executor]
+    C --> D[Reviewer]
+    D -- score ≥ 0.65, more tasks --> C
+    D -- score < 0.65, retries left --> C
+    D -- all tasks done --> E([END])
 
     subgraph Executor
-        C --> F{Agent Dispatch}
-        F -->|api| G[API Agent]
-        F -->|sql| H[SQL Agent]
-        F -->|doc| I[Doc Agent]
+        C --> F{tool type}
+        F -- api --> G[API Agent]
+        F -- sql --> H[SQL Agent]
+        F -- doc --> I[Doc Agent]
+        F -- none --> J[Direct LLM]
     end
-
-    subgraph NIM Backend
-        J[NIM Client]
-        J --> K[LLaMA 3 70B]
-        J --> L[Mixtral 8x22B]
-        J --> M[CodeLlama 70B]
-    end
-
-    G & H & I --> J
 ```
 
-## Component Descriptions
+## Component Map
 
-| Component | File | Responsibility |
-|-----------|------|----------------|
-| NIM Client | `nim/client.py` | OpenAI-compatible wrapper with Langfuse tracing |
-| State Schema | `orchestrator/state.py` | TypedDict — single source of truth for graph state |
-| Graph | `orchestrator/graph.py` | LangGraph StateGraph wiring all nodes |
-| Planner | `orchestrator/nodes/planner.py` | Decomposes query into subtasks via LLM |
-| Executor | `orchestrator/nodes/executor.py` | Routes subtasks to specialist agents |
-| Reviewer | `orchestrator/nodes/reviewer.py` | Scores results; controls loop/terminate |
+| Layer | Module | Responsibility |
+|-------|--------|----------------|
+| NIM Client | `nim/client.py` | OpenAI-compat wrapper for NIM endpoints |
+| State | `orchestrator/state.py` | Shared `TypedDict` state schema |
+| Planner | `orchestrator/nodes/planner.py` | Decomposes intent → JSON task list |
+| Executor | `orchestrator/nodes/executor.py` | Routes tasks to specialist agents |
+| Reviewer | `orchestrator/nodes/reviewer.py` | Scores outputs, drives retry/advance logic |
+| Graph | `orchestrator/graph.py` | Wires all nodes into compiled LangGraph |
 | API Agent | `agents/api_agent.py` | REST API tool-calling agent |
-| SQL Agent | `agents/sql_agent.py` | Text-to-SQL agent (SQLAlchemy) |
-| Doc Agent | `agents/doc_agent.py` | Semantic retrieval agent (ChromaDB) |
+| SQL Agent | `agents/sql_agent.py` | Text-to-SQL + query execution agent |
+| Doc Agent | `agents/doc_agent.py` | Semantic search + grounded Q&A agent |
+| API Server | `api/server.py` | FastAPI HTTP interface |
+| Evals | `evals/agent_eval.py` | Correctness + Langfuse tracing harness |
 
-## Cross-Cutting Concerns
+## Data Flow
 
-- **Observability:** Every LLM call emits traces to Langfuse via callback handler
-- **Config:** Agent models and thresholds configurable in `configs/agents.yaml` — no code changes needed
-- **Secrets:** `.env` file (gitignored); `.env.template` committed as reference
-- **CI/CD:** GitHub Actions runs `ruff`, `mypy`, `pytest` on every push
-- **Containers:** `docker-compose.yml` brings up orchestrator + ChromaDB with health checks
+```
+POST /v1/run {intent}
+  └─ graph.run(intent)
+       ├─ planner_node  → task_list: [{id, description, tool, depends_on}, ...]
+       ├─ executor_node → dispatches to ApiAgent / SqlAgent / DocAgent / LLM
+       ├─ reviewer_node → score, reason → route: continue | retry | done
+       └─ final_answer (synthesis of all task_results)
+```
+
+## NIM Integration
+
+All LLM calls go through `nim/client.py`, which wraps LangChain's `ChatOpenAI`
+pointed at `NIM_BASE_URL`. Swapping between NVIDIA-hosted NIM and a self-hosted
+instance requires only a `.env` change — no code modifications.
+
+Supported model configs are defined in `nim/config.yaml`. The `NIMClient.from_config()`
+classmethod allows per-agent model selection from `configs/agents.yaml`.
+
+## Extending the Toolkit
+
+1. **Add a new tool type**: Create a `tools/your_tools.py` with `StructuredTool` wrappers,
+   add a new agent in `agents/`, and add the routing case to `executor.py`.
+2. **Swap the model**: Update `configs/agents.yaml` — no Python changes needed.
+3. **Add eval cases**: Append `EvalCase` entries to `DEFAULT_EVAL_SUITE` in `evals/agent_eval.py`.
+4. **Deploy**: `docker-compose up` in `deploy/` — pgvector and the toolkit server start together.

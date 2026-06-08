@@ -1,42 +1,54 @@
-"""Unit tests for NIM client (mocked — no real API calls)."""
+"""Unit tests for NIM client."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
-import os
 
 import pytest
 
-
-@pytest.fixture(autouse=True)
-def set_env(monkeypatch):
-    monkeypatch.setenv("NIM_BASE_URL", "https://fake-nim.example.com/v1")
-    monkeypatch.setenv("NIM_API_KEY", "test-key")
-    monkeypatch.setenv("NIM_DEFAULT_MODEL", "meta/llama3-70b-instruct")
+from nim.client import NIMClient
 
 
-def test_nim_client_instantiation():
-    from nim.client import NIMClient
-    client = NIMClient()
-    assert client.model == "meta/llama3-70b-instruct"
-    assert "fake-nim" in client.base_url
+@pytest.fixture
+def client() -> NIMClient:
+    return NIMClient(model="meta/llama-3.1-70b-instruct")
 
 
-def test_get_llm_returns_chat_openai():
-    from nim.client import NIMClient
-    from langchain_openai import ChatOpenAI
-    client = NIMClient()
-    llm = client.get_llm()
-    assert isinstance(llm, ChatOpenAI)
+def test_client_init(client: NIMClient) -> None:
+    assert client.model == "meta/llama-3.1-70b-instruct"
+    assert client.temperature == 0.0
+    assert client.max_tokens == 2048
 
 
-@patch("httpx.get")
-def test_list_models(mock_get):
-    mock_response = MagicMock()
-    mock_response.json.return_value = {"data": [{"id": "meta/llama3-70b-instruct"}]}
-    mock_get.return_value = mock_response
+def test_from_config() -> None:
+    config = {
+        "model": "mistralai/mistral-7b-instruct-v0.3",
+        "temperature": 0.1,
+        "max_tokens": 512,
+    }
+    c = NIMClient.from_config(config)
+    assert c.model == "mistralai/mistral-7b-instruct-v0.3"
+    assert c.temperature == 0.1
+    assert c.max_tokens == 512
 
-    from nim.client import NIMClient
-    client = NIMClient()
-    models = client.list_models()
-    assert len(models) == 1
-    assert models[0]["id"] == "meta/llama3-70b-instruct"
+
+@patch("nim.client.httpx.Client")
+def test_health_check_ok(mock_httpx_cls: MagicMock, client: NIMClient) -> None:
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"data": [{"id": "meta/llama-3.1-70b-instruct"}]}
+    mock_resp.raise_for_status.return_value = None
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__ = MagicMock(return_value=MagicMock(get=MagicMock(return_value=mock_resp)))
+    mock_ctx.__exit__ = MagicMock(return_value=False)
+    mock_httpx_cls.return_value = mock_ctx
+
+    result = client.health_check()
+    assert result["status"] == "ok"
+    assert "meta/llama-3.1-70b-instruct" in result["models"]
+
+
+@patch("nim.client.httpx.Client")
+def test_health_check_error(mock_httpx_cls: MagicMock, client: NIMClient) -> None:
+    mock_httpx_cls.side_effect = Exception("Connection refused")
+    result = client.health_check()
+    assert result["status"] == "error"
+    assert "Connection refused" in result["detail"]

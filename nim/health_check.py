@@ -1,36 +1,30 @@
-"""NIM service readiness probe."""
+"""NIM service readiness probe.
+
+Can be run as a standalone script or imported as a module.
+Exits with code 0 on success, 1 on failure — suitable for Docker
+HEALTHCHECK and Kubernetes liveness probes.
+"""
 from __future__ import annotations
 
-import os
+import sys
+import logging
 
-import httpx
-from dotenv import load_dotenv
+from nim.client import NIMClient
 
-load_dotenv()
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
 
-def check_nim_health(base_url: str | None = None, api_key: str | None = None) -> bool:
-    """Return True if the NIM endpoint is reachable and returns a valid model list."""
-    url = base_url or os.environ.get("NIM_BASE_URL", "")
-    key = api_key or os.environ.get("NIM_API_KEY", "")
-    if not (url and key):
-        print("[health_check] NIM_BASE_URL or NIM_API_KEY not set.")
-        return False
-    try:
-        resp = httpx.get(
-            f"{url}/models",
-            headers={"Authorization": f"Bearer {key}"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        models = resp.json().get("data", [])
-        print(f"[health_check] NIM healthy — {len(models)} model(s) available.")
+def check(client: NIMClient | None = None) -> bool:
+    """Return True if NIM is reachable and at least one model is listed."""
+    c = client or NIMClient()
+    result = c.health_check()
+    if result["status"] == "ok":
+        logger.info("NIM healthy — available models: %s", result.get("models"))
         return True
-    except Exception as exc:  # noqa: BLE001
-        print(f"[health_check] NIM unreachable: {exc}")
-        return False
+    logger.error("NIM unhealthy — %s", result.get("detail"))
+    return False
 
 
 if __name__ == "__main__":
-    import sys
-    sys.exit(0 if check_nim_health() else 1)
+    sys.exit(0 if check() else 1)

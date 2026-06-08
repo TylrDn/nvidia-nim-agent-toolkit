@@ -1,43 +1,74 @@
-"""LangGraph StateGraph — multi-agent coordinator (Planner → Executor → Reviewer)."""
+"""LangGraph StateGraph — multi-agent coordinator.
+
+Wires the Planner → Executor → Reviewer loop with conditional edges
+based on the reviewer's quality score.
+
+Graph topology:
+  START → planner → executor → reviewer
+                               ├─ continue → executor   (next task)
+                               ├─ retry    → executor   (same task, retry)
+                               └─ done     → END
+"""
 from __future__ import annotations
 
-from langgraph.graph import StateGraph, END
+import logging
+from functools import partial
+from typing import Any
 
+from langgraph.graph import END, START, StateGraph
+from langchain_core.messages import HumanMessage
+
+from nim.client import NIMClient
 from orchestrator.state import AgentState
 from orchestrator.nodes.planner import planner_node
 from orchestrator.nodes.executor import executor_node
-from orchestrator.nodes.reviewer import reviewer_node
+from orchestrator.nodes.reviewer import reviewer_node, should_continue
+
+logger = logging.getLogger(__name__)
 
 
-def _should_continue(state: AgentState) -> str:
-    """Routing function: loop back to executor or end."""
-    if state.get("error"):
-        return END
-    if state["reviewer_score"] >= 0.8:
-        return END
-    if state["loop_count"] >= state["max_loops"]:
-        return END
-    return "executor"
+def build_graph(client: NIMClient | None = None) -> Any:
+    """Construct and compile the multi-agent StateGraph."""
+    nim = client or NIMClient()
 
-
-def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
-    graph.add_node("planner", planner_node)
-    graph.add_node("executor", executor_node)
-    graph.add_node("reviewer", reviewer_node)
+    graph.add_node("planner", partial(planner_node, client=nim))
+    graph.add_node("executor", partial(executor_node, client=nim))
+    graph.add_node("reviewer", partial(reviewer_node, client=nim))
 
-    graph.set_entry_point("planner")
+    graph.add_edge(START, "planner")
     graph.add_edge("planner", "executor")
     graph.add_edge("executor", "reviewer")
+
     graph.add_conditional_edges(
         "reviewer",
-        _should_continue,
-        {"executor": "executor", END: END},
+        should_continue,
+        {
+            "continue": "executor",
+            "retry": "executor",
+            "done": END,
+        },
     )
 
     return graph.compile()
 
 
-# Compiled graph singleton — import and invoke directly
-app = build_graph()
+def run(intent: str, client: NIMClient | None = None) -> dict[str, Any]:
+    """Run the full agent pipeline for a given user intent."""
+    app = build_graph(client)
+    initial_state: AgentState = {
+        "messages": [HumanMessage(content=intent)],
+        "user_intent": intent,
+        "task_list": [],
+        "current_task_index": 0,
+        "task_results": [],
+        "reviewer_score": 0.0,
+        "retry_count": 0,
+        "final_answer": "",
+        "metadata": {},
+    }
+    logger.info("Starting agent run: %s", intent)
+    result = app.invoke(initial_state)
+    logger.info("Agent run complete. Final answer length: %d chars", len(result.get("final_answer", "")))
+    return result
