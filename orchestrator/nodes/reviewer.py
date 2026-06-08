@@ -1,66 +1,46 @@
-"""Reviewer node — scores executor output and decides to retry or advance."""
+"""Reviewer node — scores task results and decides to loop or terminate."""
 from __future__ import annotations
+
+import json
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from nim.client import NIMClient
 from orchestrator.state import AgentState
 
-_SYSTEM_PROMPT = """\
-You are a quality-review agent. Given a task description and the result
-produced by the executor, score the result from 0.0 to 1.0.
+SYSTEM_PROMPT = """\
+You are a quality reviewer agent. Given the original user query and a list
+of task results, evaluate whether the results collectively answer the query.
 
-Return ONLY a JSON object: {"score": <float>, "reasoning": <str>}
+Respond ONLY with a JSON object:
+{
+  "score": <float 0.0–1.0>,
+  "feedback": "<one sentence explaining the score>",
+  "final_answer": "<synthesized answer if score >= 0.8, else empty string>"
+}
 """
 
-_RETRY_THRESHOLD = 0.6
-_MAX_RETRIES = 2
-
-_llm = NIMClient().get_llm()
+_client = NIMClient()
+_llm = _client.get_llm()
 
 
-def reviewer_node(state: AgentState) -> AgentState:
-    """Score latest result and update reviewer_score in state."""
-    import json
-
-    tasks = state["tasks"]
-    idx = state["current_task_idx"]
-    results = state["results"]
-
-    if not results or idx >= len(tasks):
-        return {**state, "reviewer_score": 1.0}
-
-    task = tasks[idx]
-    latest_result = results[-1]["result"]
-
-    prompt = f"Task: {task['description']}\n\nResult: {latest_result}"
+def reviewer_node(state: AgentState) -> dict:
+    results_text = json.dumps(state["task_results"], indent=2)
     messages = [
-        SystemMessage(content=_SYSTEM_PROMPT),
-        HumanMessage(content=prompt),
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(
+            content=f"User query: {state['user_query']}\n\nTask results:\n{results_text}"
+        ),
     ]
     response = _llm.invoke(messages)
     try:
         parsed = json.loads(response.content)
-        score = float(parsed.get("score", 0.5))
-    except (json.JSONDecodeError, ValueError):
-        score = 0.5
+    except json.JSONDecodeError:
+        parsed = {"score": 0.5, "feedback": "Could not parse reviewer response.", "final_answer": ""}
 
     return {
-        **state,
-        "reviewer_score": score,
-        "messages": state["messages"] + [response],
+        "reviewer_score": float(parsed.get("score", 0.5)),
+        "reviewer_feedback": parsed.get("feedback", ""),
+        "final_answer": parsed.get("final_answer") or None,
+        "loop_count": state.get("loop_count", 0) + 1,
     }
-
-
-def should_retry(state: AgentState) -> str:
-    """Conditional edge: 'retry', 'advance', or 'done'."""
-    score = state.get("reviewer_score", 1.0)
-    retry_count = state.get("retry_count", 0)
-    idx = state["current_task_idx"]
-    total = len(state["tasks"])
-
-    if score < _RETRY_THRESHOLD and retry_count < _MAX_RETRIES:
-        return "retry"
-    if idx + 1 < total:
-        return "advance"
-    return "done"

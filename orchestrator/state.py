@@ -1,35 +1,39 @@
-"""TypedDict agent state schema shared across all LangGraph nodes."""
+"""LangGraph TypedDict state schema for the multi-agent coordinator."""
 from __future__ import annotations
 
 from typing import Annotated, Any
-
-from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
+import operator
+
+
+class SubTask(TypedDict):
+    task_id: str
+    description: str
+    agent: str  # "api" | "sql" | "doc"
+    status: str  # "pending" | "running" | "done" | "failed"
+    result: str | None
 
 
 class AgentState(TypedDict):
-    """Shared mutable state passed through every graph node."""
+    """Shared state threaded through every node in the LangGraph."""
 
-    # Accumulated message history (human + AI turns)
-    messages: Annotated[list[Any], add_messages]
+    # User input
+    user_query: str
+    session_id: str
 
-    # Original user request (immutable reference)
-    user_request: str
+    # Planner output
+    plan: list[SubTask]
+    current_task_index: int
 
-    # Planner output — ordered list of subtask dicts
-    tasks: list[dict[str, Any]]
+    # Executor output — accumulated across tasks
+    task_results: Annotated[list[dict[str, Any]], operator.add]
 
-    # Index of the task currently being executed
-    current_task_idx: int
+    # Reviewer output
+    reviewer_score: float  # 0.0 – 1.0
+    reviewer_feedback: str
+    loop_count: int
+    max_loops: int
 
-    # Collected results from the executor
-    results: list[dict[str, Any]]
-
-    # Reviewer score for the latest executor output (0.0–1.0)
-    reviewer_score: float
-
-    # Number of retry attempts on the current task
-    retry_count: int
-
-    # Terminal output delivered to the user
-    final_answer: str
+    # Final answer
+    final_answer: str | None
+    error: str | None

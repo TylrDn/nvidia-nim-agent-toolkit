@@ -1,32 +1,40 @@
-"""Executor node — dispatches the current task to the appropriate agent."""
+"""Executor node — dispatches the current subtask to the appropriate agent."""
 from __future__ import annotations
 
 from orchestrator.state import AgentState
+from agents.api_agent import run_api_agent
+from agents.sql_agent import run_sql_agent
+from agents.doc_agent import run_doc_agent
+
+_AGENT_DISPATCH = {
+    "api": run_api_agent,
+    "sql": run_sql_agent,
+    "doc": run_doc_agent,
+}
 
 
-def executor_node(state: AgentState) -> AgentState:
-    """Run the current subtask via the correct tool agent."""
-    from agents.api_agent import run as run_api
-    from agents.doc_agent import run as run_doc
-    from agents.sql_agent import run as run_sql
+def executor_node(state: AgentState) -> dict:
+    plan = state["plan"]
+    idx = state["current_task_index"]
 
-    tasks = state["tasks"]
-    idx = state["current_task_idx"]
+    # Find the next pending task
+    pending = [i for i, t in enumerate(plan) if t["status"] == "pending"]
+    if not pending:
+        return {"task_results": []}
 
-    if idx >= len(tasks):
-        return state
+    task = plan[pending[0]]
+    agent_fn = _AGENT_DISPATCH.get(task["agent"], run_doc_agent)
 
-    task = tasks[idx]
-    tool = task.get("tool", "none")
-
-    dispatch = {"api": run_api, "sql": run_sql, "doc": run_doc}
-
-    if tool in dispatch:
-        result = dispatch[tool](task["description"])
-    else:
-        result = {"output": task["description"], "tool": "none"}
+    try:
+        result = agent_fn(task["description"])
+        task["status"] = "done"
+        task["result"] = result
+    except Exception as exc:  # noqa: BLE001
+        task["status"] = "failed"
+        task["result"] = f"Error: {exc}"
 
     return {
-        **state,
-        "results": state["results"] + [{"task_id": task["id"], "result": result}],
+        "plan": plan,
+        "current_task_index": pending[0] + 1,
+        "task_results": [{"task_id": task["task_id"], "result": task["result"]}],
     }

@@ -2,63 +2,54 @@
 
 ## Overview
 
-This toolkit implements a **Planner → Executor → Reviewer** multi-agent loop
-orchestrated via LangGraph. All LLM inference routes through NVIDIA NIM
-microservices via their OpenAI-compatible REST API.
+This toolkit implements a **Planner → Executor → Reviewer (PER)** multi-agent loop
+orchestrated by LangGraph, with NVIDIA NIM providing the inference backend.
 
-## Component Diagram
+## Agent Flow
 
 ```mermaid
 graph TD
-    U[User Request] --> API[FastAPI /agent/run]
-    API --> PL[Planner Node]
-    PL -->|task list| EX[Executor Node]
-    EX -->|api| AA[API Agent]
-    EX -->|sql| SA[SQL Agent]
-    EX -->|doc| DA[Doc Agent]
-    AA & SA & DA --> EX
-    EX -->|results| RV[Reviewer Node]
-    RV -->|score ≥ 0.6| AD[Advance Task]
-    RV -->|score < 0.6 & retries < 2| RT[Retry]
-    RV -->|all tasks done| FN[Finalize]
-    AD --> EX
-    RT --> EX
-    FN --> OUT[Final Answer]
+    A([User Query]) --> B[Planner Node]
+    B --> C[Executor Node]
+    C --> D[Reviewer Node]
+    D -->|score < 0.8 and loops < max| C
+    D -->|score >= 0.8 or max loops| E([Final Answer])
 
-    NIM[NVIDIA NIM\nOpenAI-Compatible API] -.->|LLM calls| PL & RV & AA & SA & DA
+    subgraph Executor
+        C --> F{Agent Dispatch}
+        F -->|api| G[API Agent]
+        F -->|sql| H[SQL Agent]
+        F -->|doc| I[Doc Agent]
+    end
+
+    subgraph NIM Backend
+        J[NIM Client]
+        J --> K[LLaMA 3 70B]
+        J --> L[Mixtral 8x22B]
+        J --> M[CodeLlama 70B]
+    end
+
+    G & H & I --> J
 ```
 
-## Data Flow
+## Component Descriptions
 
-1. **FastAPI** receives `{user_request}` and initialises `AgentState`.
-2. **Planner** calls NIM to decompose the request into `tasks[]`.
-3. **Executor** dispatches each task to the correct tool agent (API / SQL / Doc).
-4. **Reviewer** scores the result; conditional edges decide to retry, advance, or finalise.
-5. **Finalize** node assembles `final_answer` from all collected results.
+| Component | File | Responsibility |
+|-----------|------|----------------|
+| NIM Client | `nim/client.py` | OpenAI-compatible wrapper with Langfuse tracing |
+| State Schema | `orchestrator/state.py` | TypedDict — single source of truth for graph state |
+| Graph | `orchestrator/graph.py` | LangGraph StateGraph wiring all nodes |
+| Planner | `orchestrator/nodes/planner.py` | Decomposes query into subtasks via LLM |
+| Executor | `orchestrator/nodes/executor.py` | Routes subtasks to specialist agents |
+| Reviewer | `orchestrator/nodes/reviewer.py` | Scores results; controls loop/terminate |
+| API Agent | `agents/api_agent.py` | REST API tool-calling agent |
+| SQL Agent | `agents/sql_agent.py` | Text-to-SQL agent (SQLAlchemy) |
+| Doc Agent | `agents/doc_agent.py` | Semantic retrieval agent (ChromaDB) |
 
-## NIM Integration
+## Cross-Cutting Concerns
 
-`nim/client.py` wraps any NIM endpoint via `langchain_openai.ChatOpenAI`:
-
-```python
-from nim.client import NIMClient
-llm = NIMClient().get_llm()          # points to NIM_BASE_URL
-response = llm.invoke(messages)      # standard LangChain call
-```
-
-Swap models by editing `nim/config.yaml` — no Python changes needed.
-
-## State Schema
-
-See `orchestrator/state.py` — `AgentState` is a LangGraph `TypedDict`
-carrying messages, task list, results, reviewer score, and retry count.
-
-## Key Design Decisions
-
-| Decision | Rationale |
-|---|---|
-| NIM via OpenAI-compat API | Zero vendor lock-in; swap any OpenAI SDK model |
-| LangGraph StateGraph | Explicit state + conditional edges = auditable loops |
-| StructuredTool wrappers | Pydantic schemas for tool inputs = safe, typed calls |
-| YAML agent configs | Persona/model swap without code changes = ISV-friendly |
-| FastAPI wrapper | Standard REST surface for enterprise integration |
+- **Observability:** Every LLM call emits traces to Langfuse via callback handler
+- **Config:** Agent models and thresholds configurable in `configs/agents.yaml` — no code changes needed
+- **Secrets:** `.env` file (gitignored); `.env.template` committed as reference
+- **CI/CD:** GitHub Actions runs `ruff`, `mypy`, `pytest` on every push
+- **Containers:** `docker-compose.yml` brings up orchestrator + ChromaDB with health checks

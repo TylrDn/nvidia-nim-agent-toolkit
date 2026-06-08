@@ -1,40 +1,32 @@
-# Agent persona and model configs — swap without code changes.
-# Each entry maps a logical agent role to a NIM model + system prompt.
-
 agents:
   planner:
-    model: meta/llama-3.1-8b-instruct
+    model: meta/llama3-70b-instruct
     temperature: 0.0
-    system_prompt: |
-      You are a task-planning agent. Decompose the user request into an
-      ordered JSON array of atomic subtasks.
+    description: Decomposes user queries into ordered subtasks
 
   executor:
-    model: meta/llama-3.1-8b-instruct
+    model: meta/llama3-70b-instruct
     temperature: 0.0
-    system_prompt: |
-      You are an execution agent. Complete the given subtask using available tools.
+    description: Dispatches subtasks to specialist agents
 
   reviewer:
-    model: meta/llama-3.1-8b-instruct
+    model: meta/llama3-70b-instruct
     temperature: 0.0
-    system_prompt: |
-      You are a quality reviewer. Score the executor output from 0.0 to 1.0.
+    description: Scores results and decides to loop or terminate
+    pass_threshold: 0.8
+    max_loops: 3
 
   api_agent:
-    model: meta/llama-3.1-8b-instruct
+    model: meta/llama3-8b-instruct
     temperature: 0.0
-    system_prompt: |
-      You are an API agent. Use http_get to fetch data and return JSON answers.
+    description: Handles REST API data fetching tasks
 
   sql_agent:
-    model: meta/llama-3.1-8b-instruct
+    model: meta/llama3-70b-instruct
     temperature: 0.0
-    system_prompt: |
-      You are a SQL agent. Translate requests to SELECT queries, run them, return results.
+    description: Handles text-to-SQL database queries
 
   doc_agent:
-    model: meta/llama-3.1-8b-instruct
+    model: meta/llama3-70b-instruct
     temperature: 0.0
-    system_prompt: |
-      You are a document-retrieval agent. Find relevant passages and synthesise answers.
+    description: Handles document store semantic retrieval

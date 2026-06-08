@@ -1,34 +1,61 @@
-"""Standalone SQL tools importable outside the agent context."""
+"""StructuredTool wrappers for SQL database queries via SQLAlchemy."""
 from __future__ import annotations
 
 import os
-from typing import Any
 
 from langchain.tools import StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
-_engine = create_engine(os.getenv("DATABASE_URL", "sqlite:///./demo.db"))
+_engine = None
 
 
-class SQLInput(BaseModel):
-    query: str = Field(..., description="Read-only SELECT statement")
+def _get_engine():
+    global _engine
+    if _engine is None:
+        db_url = os.environ.get("DB_URL", "sqlite:///./agent.db")
+        _engine = create_engine(db_url)
+    return _engine
 
 
-def sql_query(query: str) -> dict[str, Any]:
-    if not query.strip().upper().startswith("SELECT"):
-        return {"error": "Only SELECT queries allowed."}
-    try:
-        with _engine.connect() as conn:
-            rows = conn.execute(text(query)).fetchall()
-            return {"rows": [dict(r._mapping) for r in rows]}
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc)}
+class RunQueryInput(BaseModel):
+    query: str
 
 
-SQL_QUERY_TOOL = StructuredTool.from_function(
-    func=sql_query,
-    name="sql_query",
-    description="Execute a read-only SQL SELECT query.",
-    args_schema=SQLInput,
-)
+def _run_query(query: str) -> str:
+    """Execute a read-only SQL query and return results as a string."""
+    engine = _get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text(query))
+        rows = result.fetchmany(50)  # limit rows
+        cols = list(result.keys())
+        return str({"columns": cols, "rows": [dict(zip(cols, r)) for r in rows]})
+
+
+class ListTablesInput(BaseModel):
+    pass
+
+
+def _list_tables() -> str:
+    """Return a list of available tables in the database."""
+    engine = _get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+        return str([row[0] for row in result])
+
+
+def get_sql_tools() -> list[StructuredTool]:
+    return [
+        StructuredTool.from_function(
+            func=_run_query,
+            name="run_sql_query",
+            description="Execute a SQL SELECT query against the database. Return results as JSON.",
+            args_schema=RunQueryInput,
+        ),
+        StructuredTool.from_function(
+            func=_list_tables,
+            name="list_tables",
+            description="List all tables available in the database.",
+            args_schema=ListTablesInput,
+        ),
+    ]

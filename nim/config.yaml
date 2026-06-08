@@ -1,23 +1,10 @@
-# NIM model endpoint configurations
-# Swap the active model without touching Python code.
-
-default_model: meta/llama-3.1-8b-instruct
-
 models:
-  llama3_8b:
-    id: meta/llama-3.1-8b-instruct
-    endpoint: ${NIM_BASE_URL}
-    max_tokens: 2048
-    temperature: 0.0
+  default: meta/llama3-70b-instruct
+  fast: meta/llama3-8b-instruct
+  reasoning: mistralai/mixtral-8x22b-instruct-v0.1
+  code: meta/codellama-70b-instruct
 
-  llama3_70b:
-    id: meta/llama-3.1-70b-instruct
-    endpoint: ${NIM_BASE_URL}
-    max_tokens: 4096
-    temperature: 0.0
-
-  mistral_7b:
-    id: mistralai/mistral-7b-instruct-v0.3
-    endpoint: ${NIM_BASE_URL}
-    max_tokens: 2048
-    temperature: 0.0
+endpoints:
+  base_url: https://integrate.api.nvidia.com/v1
+  timeout_seconds: 60
+  max_retries: 3

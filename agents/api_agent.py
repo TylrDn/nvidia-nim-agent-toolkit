@@ -1,52 +1,27 @@
 """REST API tool-calling agent."""
 from __future__ import annotations
 
-import os
-from typing import Any
-
 import httpx
-from langchain.tools import StructuredTool
-from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate
 
 from nim.client import NIMClient
+from tools.api_tools import get_api_tools
+
+PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "You are an API agent. Use the provided tools to fetch data from REST APIs. "
+               "Return a concise, factual answer. {agent_scratchpad}"),
+    ("human", "{input}"),
+])
 
 
-class APIQueryInput(BaseModel):
-    url: str = Field(..., description="Full URL to GET")
-    params: dict[str, str] = Field(default_factory=dict,
-                                   description="Query parameters")
+def run_api_agent(task_description: str) -> str:
+    """Run the API agent on a task and return the result string."""
+    client = NIMClient()
+    llm = client.get_llm()
+    tools = get_api_tools()
 
-
-def _http_get(url: str, params: dict[str, str] | None = None) -> dict[str, Any]:
-    try:
-        resp = httpx.get(url, params=params or {}, timeout=15)
-        resp.raise_for_status()
-        return {"status": resp.status_code, "body": resp.json()}
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc)}
-
-
-_api_tool = StructuredTool.from_function(
-    func=_http_get,
-    name="http_get",
-    description="Perform an HTTP GET request and return the JSON response.",
-    args_schema=APIQueryInput,
-)
-
-_llm = NIMClient().get_llm().bind_tools([_api_tool])
-
-_SYSTEM = (
-    "You are an API agent. Use the http_get tool to answer the user's request. "
-    "Always return structured JSON in your final answer."
-)
-
-
-def run(task_description: str) -> dict[str, Any]:
-    """Execute the API agent for a single task."""
-    messages = [
-        SystemMessage(content=_SYSTEM),
-        HumanMessage(content=task_description),
-    ]
-    response = _llm.invoke(messages)
-    return {"output": response.content, "tool": "api"}
+    agent = create_tool_calling_agent(llm, tools, PROMPT)
+    executor = AgentExecutor(agent=agent, tools=tools, verbose=True, max_iterations=5)
+    result = executor.invoke({"input": task_description})
+    return str(result.get("output", ""))

@@ -7,14 +7,12 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-test:
+  lint-typecheck-test:
     runs-on: ubuntu-latest
-    python-version: "3.11"
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -22,16 +20,17 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -e .
 
       - name: Lint (ruff)
         run: ruff check .
 
       - name: Type check (mypy)
-        run: mypy nim/ orchestrator/ agents/ tools/ --ignore-missing-imports
+        run: mypy orchestrator/ agents/ nim/ tools/ --ignore-missing-imports
 
-      - name: Test (pytest)
-        run: pytest tests/ -v
+      - name: Run tests
         env:
-          NIM_API_KEY: ${{ secrets.NIM_API_KEY }}
-          LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY }}
+          NIM_BASE_URL: https://fake-nim.example.com/v1
+          NIM_API_KEY: test-key
+          NIM_DEFAULT_MODEL: meta/llama3-70b-instruct
+        run: pytest tests/ -v

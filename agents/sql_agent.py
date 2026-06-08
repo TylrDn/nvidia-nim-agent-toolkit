@@ -1,56 +1,26 @@
 """Text-to-SQL agent backed by SQLAlchemy."""
 from __future__ import annotations
 
-import os
-from typing import Any
-
-from langchain.tools import StructuredTool
-from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, text
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate
 
 from nim.client import NIMClient
+from tools.sql_tools import get_sql_tools
 
-_DB_URL = os.getenv("DATABASE_URL", "sqlite:///./demo.db")
-_engine = create_engine(_DB_URL)
-
-
-class SQLQueryInput(BaseModel):
-    query: str = Field(..., description="A read-only SQL SELECT statement")
-
-
-def _run_sql(query: str) -> dict[str, Any]:
-    if not query.strip().upper().startswith("SELECT"):
-        return {"error": "Only SELECT queries are permitted."}
-    try:
-        with _engine.connect() as conn:
-            rows = conn.execute(text(query)).fetchall()
-            return {"rows": [dict(r._mapping) for r in rows]}
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc)}
+PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "You are a SQL agent. Use the provided tools to query the database. "
+               "Always explain your query before running it. {agent_scratchpad}"),
+    ("human", "{input}"),
+])
 
 
-_sql_tool = StructuredTool.from_function(
-    func=_run_sql,
-    name="sql_query",
-    description="Execute a read-only SQL SELECT query and return the results.",
-    args_schema=SQLQueryInput,
-)
+def run_sql_agent(task_description: str) -> str:
+    """Run the SQL agent on a task and return the result string."""
+    client = NIMClient()
+    llm = client.get_llm()
+    tools = get_sql_tools()
 
-_llm = NIMClient().get_llm().bind_tools([_sql_tool])
-
-_SYSTEM = (
-    "You are a SQL agent. Translate the user's natural-language request into a "
-    "valid SQL SELECT query, execute it with the sql_query tool, and return the "
-    "results as structured JSON."
-)
-
-
-def run(task_description: str) -> dict[str, Any]:
-    """Execute the SQL agent for a single task."""
-    messages = [
-        SystemMessage(content=_SYSTEM),
-        HumanMessage(content=task_description),
-    ]
-    response = _llm.invoke(messages)
-    return {"output": response.content, "tool": "sql"}
+    agent = create_tool_calling_agent(llm, tools, PROMPT)
+    executor = AgentExecutor(agent=agent, tools=tools, verbose=True, max_iterations=5)
+    result = executor.invoke({"input": task_description})
+    return str(result.get("output", ""))

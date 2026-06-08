@@ -1,91 +1,104 @@
-"""LangSmith tracing + correctness evaluation for the multi-agent graph."""
+"""Agent evaluation harness with LangSmith tracing and correctness checks."""
 from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any
 
-from langsmith import Client
-from langsmith.evaluation import evaluate
+from dotenv import load_dotenv
+from langfuse import Langfuse
 
-from orchestrator.graph import graph
-
-_LS_CLIENT = Client()
-_DATASET_NAME = os.getenv("LANGSMITH_DATASET", "nim-agent-eval-v1")
-_EXPERIMENT_PREFIX = os.getenv("LANGSMITH_EXPERIMENT_PREFIX", "nim-agent")
-
+load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Ground-truth dataset (seed inline; in production load from JSON file)
+# Eval dataset — extend with domain-specific QA pairs
 # ---------------------------------------------------------------------------
-_SEED_EXAMPLES = [
+
+EVAL_DATASET = [
     {
-        "inputs": {"user_request": "What is 2 + 2?"},
-        "outputs": {"expected_keywords": ["4", "four"]},
+        "query": "What is the capital of France?",
+        "expected_keywords": ["Paris"],
     },
     {
-        "inputs": {"user_request": "Fetch the top post from https://jsonplaceholder.typicode.com/posts/1"},
-        "outputs": {"expected_keywords": ["userId", "title"]},
+        "query": "Summarize the concept of retrieval-augmented generation.",
+        "expected_keywords": ["retrieval", "generation", "context"],
+    },
+    {
+        "query": "List the top 3 NVIDIA GPU architectures for AI inference.",
+        "expected_keywords": ["Hopper", "Ada", "Ampere"],
     },
 ]
 
 
-def _ensure_dataset() -> str:
-    """Create dataset if it doesn't exist; return its name."""
-    datasets = list(_LS_CLIENT.list_datasets(dataset_name=_DATASET_NAME))
-    if not datasets:
-        ds = _LS_CLIENT.create_dataset(_DATASET_NAME,
-                                       description="NIM agent eval ground truth")
-        _LS_CLIENT.create_examples(
-            inputs=[e["inputs"] for e in _SEED_EXAMPLES],
-            outputs=[e["outputs"] for e in _SEED_EXAMPLES],
-            dataset_id=ds.id,
+@dataclass
+class EvalResult:
+    query: str
+    answer: str
+    passed: bool
+    missing_keywords: list[str] = field(default_factory=list)
+    score: float = 0.0
+
+
+def run_eval(num_cases: int = len(EVAL_DATASET)) -> list[EvalResult]:
+    """Run evaluation cases through the agent graph and score results."""
+    from orchestrator.graph import app
+
+    langfuse = _get_langfuse()
+    results: list[EvalResult] = []
+
+    for case in EVAL_DATASET[:num_cases]:
+        state = {
+            "user_query": case["query"],
+            "session_id": "eval",
+            "task_results": [],
+            "loop_count": 0,
+            "max_loops": 2,
+        }
+        output = app.invoke(state)
+        answer = output.get("final_answer") or ""
+        missing = [
+            kw for kw in case["expected_keywords"]
+            if kw.lower() not in answer.lower()
+        ]
+        passed = len(missing) == 0
+        score = 1.0 - (len(missing) / max(len(case["expected_keywords"]), 1))
+
+        result = EvalResult(
+            query=case["query"],
+            answer=answer,
+            passed=passed,
+            missing_keywords=missing,
+            score=score,
         )
-    return _DATASET_NAME
+        results.append(result)
+
+        if langfuse:
+            langfuse.score(
+                name="keyword_coverage",
+                value=score,
+                comment=f"Missing: {missing}",
+            )
+
+    _print_report(results)
+    return results
 
 
-# ---------------------------------------------------------------------------
-# Target function — wraps the graph invoke call
-# ---------------------------------------------------------------------------
-def _run_agent(inputs: dict[str, Any]) -> dict[str, Any]:
-    state = graph.invoke({
-        "messages": [],
-        "user_request": inputs["user_request"],
-        "tasks": [],
-        "current_task_idx": 0,
-        "results": [],
-        "reviewer_score": 0.0,
-        "retry_count": 0,
-        "final_answer": "",
-    })
-    return {"final_answer": state["final_answer"]}
+def _get_langfuse() -> Langfuse | None:
+    if os.environ.get("LANGFUSE_PUBLIC_KEY"):
+        return Langfuse()
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Evaluators
-# ---------------------------------------------------------------------------
-def _keyword_evaluator(run: Any, example: Any) -> dict[str, Any]:
-    """Pass if any expected keyword appears in the final answer."""
-    answer = (run.outputs or {}).get("final_answer", "").lower()
-    keywords = (example.outputs or {}).get("expected_keywords", [])
-    passed = any(kw.lower() in answer for kw in keywords)
-    return {"key": "keyword_match", "score": int(passed)}
-
-
-# ---------------------------------------------------------------------------
-# Main eval runner
-# ---------------------------------------------------------------------------
-def run_eval() -> None:
-    dataset_name = _ensure_dataset()
-    results = evaluate(
-        _run_agent,
-        data=dataset_name,
-        evaluators=[_keyword_evaluator],
-        experiment_prefix=_EXPERIMENT_PREFIX,
-        max_concurrency=2,
-    )
-    print(json.dumps({"summary": str(results)}, indent=2))
+def _print_report(results: list[EvalResult]) -> None:
+    passed = sum(1 for r in results if r.passed)
+    avg_score = sum(r.score for r in results) / max(len(results), 1)
+    print(f"\nEval Results: {passed}/{len(results)} passed | Avg score: {avg_score:.2f}")
+    for r in results:
+        status = "✅" if r.passed else "❌"
+        print(f"  {status} {r.query[:60]}")
+        if r.missing_keywords:
+            print(f"     Missing: {r.missing_keywords}")
 
 
 if __name__ == "__main__":
