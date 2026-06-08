@@ -1,0 +1,36 @@
+# NIM Model Endpoint Configurations
+# Reference: https://docs.api.nvidia.com/nim/reference/llm-apis
+
+models:
+  default: meta/llama-3.1-70b-instruct
+
+  available:
+    - id: meta/llama-3.1-70b-instruct
+      context_length: 128000
+      supports_tools: true
+      use_case: general_agent
+
+    - id: meta/llama-3.1-8b-instruct
+      context_length: 128000
+      supports_tools: true
+      use_case: fast_agent
+
+    - id: mistralai/mistral-7b-instruct-v0.3
+      context_length: 32768
+      supports_tools: true
+      use_case: lightweight
+
+    - id: nvidia/nemotron-4-340b-instruct
+      context_length: 4096
+      supports_tools: false
+      use_case: reasoning
+
+    - id: nv-embedqa-e5-v5
+      context_length: 512
+      supports_tools: false
+      use_case: embeddings
+
+endpoints:
+  base_url: https://integrate.api.nvidia.com/v1
+  timeout_seconds: 60
+  max_retries: 3
