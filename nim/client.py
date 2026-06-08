@@ -1,143 +1,234 @@
-"""NIM OpenAI-compatible API client wrapper."""
+"""NIM client — wraps NVIDIA NIM inference endpoints.
+
+Langfuse tracing is supported via the LangChain path (`as_langchain_llm()`).
+The raw OpenAI SDK path (`chat()`, `stream_chat()`, `chat_with_tools()`) does
+NOT support LangChain callbacks; set LANGFUSE_PUBLIC_KEY to enable tracing
+only when calling through `as_langchain_llm()`.
+"""
+
 from __future__ import annotations
 
 import os
-import time
-from typing import Any, Iterator
+from typing import Any, Generator, Iterator
 
-import httpx
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import BaseMessage
 from openai import OpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
 
-from nim.health_check import wait_for_nim
+# ---------------------------------------------------------------------------
+# Optional Langfuse import
+# ---------------------------------------------------------------------------
+try:
+    from langfuse.callback import CallbackHandler as LangfuseCallbackHandler
+
+    LANGFUSE_AVAILABLE = True
+except ImportError:  # langfuse not installed — tracing silently disabled
+    LangfuseCallbackHandler = None  # type: ignore[assignment,misc]
+    LANGFUSE_AVAILABLE = False
 
 
-NIM_BASE_URL = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NIM_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
 
+def _get_langfuse_handler() -> "LangfuseCallbackHandler | None":
+    """Return a Langfuse CallbackHandler if credentials are configured.
+
+    Returns ``None`` (and never raises) when:
+    - ``langfuse`` package is not installed
+    - ``LANGFUSE_PUBLIC_KEY`` env var is not set
+    """
+    if not LANGFUSE_AVAILABLE:
+        return None
+    if os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"):
+        return LangfuseCallbackHandler(
+            public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+            secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+            host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"),
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# NIMClient
+# ---------------------------------------------------------------------------
 
 class NIMClient:
-    """Thin wrapper around NVIDIA NIM that exposes an OpenAI-compatible interface.
+    """Client for NVIDIA NIM inference endpoints.
 
-    All LangChain LLM call paths route through this class so swapping the
-    underlying NIM endpoint requires changing only ``config.yaml``.
+    Environment variables
+    ---------------------
+    NVIDIA_API_KEY : str
+        API key for NVIDIA NIM / NGC.
+    NIM_BASE_URL : str
+        Base URL for the NIM endpoint (default: ``https://integrate.api.nvidia.com/v1``).
+    LANGFUSE_PUBLIC_KEY : str, optional
+        Enable Langfuse tracing on LangChain calls.
+    LANGFUSE_SECRET_KEY : str, optional
+        Langfuse secret key.
+    LANGFUSE_HOST : str, optional
+        Langfuse server URL (default: ``https://cloud.langfuse.com``).
     """
 
     def __init__(
         self,
-        model: str = "meta/llama-3.1-70b-instruct",
-        base_url: str = NIM_BASE_URL,
-        api_key: str = NIM_API_KEY,
-        temperature: float = 0.0,
-        max_tokens: int = 2048,
-        timeout: int = 60,
+        model: str = "meta/llama-3.1-8b-instruct",
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        base_url: str | None = None,
+        api_key: str | None = None,
     ) -> None:
         self.model = model
-        self.base_url = base_url
-        self.api_key = api_key
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.timeout = timeout
-
-        self._openai = OpenAI(base_url=base_url, api_key=api_key)
+        self.base_url = base_url or os.getenv(
+            "NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"
+        )
+        self.api_key = api_key or os.getenv("NVIDIA_API_KEY", "")
 
     # ------------------------------------------------------------------
-    # LangChain-compatible LLM (preferred call path)
+    # LangChain integration (Langfuse tracing supported here)
     # ------------------------------------------------------------------
 
-    def as_langchain_llm(self) -> ChatOpenAI:
-        """Return a LangChain ChatOpenAI instance pointed at NIM."""
+    def as_langchain_llm(self, **kwargs: Any) -> ChatOpenAI:
+        """Return a LangChain ``ChatOpenAI`` instance pointed at the NIM endpoint.
+
+        Langfuse tracing is automatically attached as a callback when
+        ``LANGFUSE_PUBLIC_KEY`` and ``LANGFUSE_SECRET_KEY`` are set.
+        """
+        handler = _get_langfuse_handler()
+        callbacks = [handler] if handler else []
+
         return ChatOpenAI(
             model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             openai_api_base=self.base_url,
             openai_api_key=self.api_key,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            request_timeout=self.timeout,
-        )
-
-    # ------------------------------------------------------------------
-    # Raw OpenAI SDK call paths
-    # ------------------------------------------------------------------
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def chat(
-        self,
-        messages: list[dict[str, str]],
-        stream: bool = False,
-        **kwargs: Any,
-    ) -> Any:
-        """Send a chat completion request to NIM."""
-        return self._openai.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            stream=stream,
+            callbacks=callbacks,
             **kwargs,
         )
 
-    def stream_chat(self, messages: list[dict[str, str]], **kwargs: Any) -> Iterator[str]:
-        """Yield token chunks from a streaming NIM completion."""
-        response = self.chat(messages, stream=True, **kwargs)
-        for chunk in response:
-            delta = chunk.choices[0].delta
-            if delta.content:
-                yield delta.content
+    # ------------------------------------------------------------------
+    # Raw OpenAI SDK methods
+    # NOTE: Langfuse LangChain callbacks are NOT supported on these paths.
+    #       Use as_langchain_llm() for traced calls.
+    # ------------------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # Tool / function calling
-    # ------------------------------------------------------------------
+    def _get_openai_client(self) -> OpenAI:
+        """Return a raw OpenAI SDK client pointed at the NIM endpoint."""
+        return OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+        )
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Send a chat request and return the assistant's message content.
+
+        Note: Langfuse tracing is **not** available on this raw SDK path.
+        Switch to ``as_langchain_llm()`` for traced inference.
+        """
+        client = self._get_openai_client()
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature if temperature is not None else self.temperature,
+            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+            **kwargs,
+        )
+        return response.choices[0].message.content
+
+    def stream_chat(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        **kwargs: Any,
+    ) -> Iterator[str]:
+        """Stream a chat response, yielding content chunks as they arrive.
+
+        Note: Langfuse tracing is **not** available on this raw SDK path.
+        Switch to ``as_langchain_llm()`` for traced inference.
+        """
+        client = self._get_openai_client()
+        stream = client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature if temperature is not None else self.temperature,
+            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+            stream=True,
+            **kwargs,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.content is not None:
+                yield delta.content
 
     def chat_with_tools(
         self,
         messages: list[dict[str, str]],
         tools: list[dict[str, Any]],
-        tool_choice: str = "auto",
+        tool_choice: str | dict[str, Any] = "auto",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         **kwargs: Any,
-    ) -> Any:
-        """NIM function-calling — passes OpenAI tool spec directly."""
-        return self._openai.chat.completions.create(
+    ) -> dict[str, Any]:
+        """Send a chat request with tool/function definitions.
+
+        Returns the raw ``choices[0].message`` as a dict so callers can
+        inspect ``tool_calls`` and ``content``.
+
+        Note: Langfuse tracing is **not** available on this raw SDK path.
+        Switch to ``as_langchain_llm()`` for traced inference.
+        """
+        client = self._get_openai_client()
+        response = client.chat.completions.create(
             model=self.model,
             messages=messages,
             tools=tools,
             tool_choice=tool_choice,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
+            temperature=temperature if temperature is not None else self.temperature,
+            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
             **kwargs,
         )
-
-    # ------------------------------------------------------------------
-    # Embeddings
-    # ------------------------------------------------------------------
-
-    def embed(self, texts: list[str], model: str = "nvidia/nv-embedqa-e5-v5") -> list[list[float]]:
-        """Return dense embeddings via NIM embeddings endpoint."""
-        resp = self._openai.embeddings.create(model=model, input=texts)
-        return [d.embedding for d in resp.data]
-
-    # ------------------------------------------------------------------
-    # Metadata
-    # ------------------------------------------------------------------
-
-    def list_models(self) -> list[str]:
-        """Return available NIM model IDs."""
-        resp = self._openai.models.list()
-        return [m.id for m in resp.data]
-
-    def __repr__(self) -> str:
-        return f"NIMClient(model={self.model!r}, base_url={self.base_url!r})"
+        message = response.choices[0].message
+        return {
+            "content": message.content,
+            "tool_calls": message.tool_calls,
+            "role": message.role,
+        }
 
 
-# Module-level singleton — import and use directly
-_default_client: NIMClient | None = None
+# ---------------------------------------------------------------------------
+# Module-level singleton
+# ---------------------------------------------------------------------------
+
+_client_instance: NIMClient | None = None
 
 
-def get_client(model: str | None = None) -> NIMClient:
-    """Return a shared NIMClient instance (lazy init)."""
-    global _default_client
-    if _default_client is None or model is not None:
-        _default_client = NIMClient(model=model or "meta/llama-3.1-70b-instruct")
-    return _default_client
+def get_client(
+    model: str = "meta/llama-3.1-8b-instruct",
+    temperature: float = 0.7,
+    max_tokens: int = 1024,
+    **kwargs: Any,
+) -> NIMClient:
+    """Return (or lazily create) the module-level ``NIMClient`` singleton.
+
+    Subsequent calls with the same arguments return the cached instance.
+    Pass different arguments to force a new instance by constructing
+    ``NIMClient(...)`` directly.
+    """
+    global _client_instance
+    if _client_instance is None:
+        _client_instance = NIMClient(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **kwargs,
+        )
+    return _client_instance
