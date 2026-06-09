@@ -9,6 +9,9 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    env:
+      NIM_API_KEY: test-key
+      NIM_BASE_URL: https://nim.test/v1
     steps:
       - uses: actions/checkout@v4
 
@@ -21,16 +24,12 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff mypy pytest pytest-cov
 
       - name: Lint (ruff)
-        run: ruff check . --ignore E501
+        run: ruff check .
 
       - name: Type check (mypy)
-        run: mypy nim/ orchestrator/ agents/ tools/ api/ --ignore-missing-imports
+        run: mypy nim/ orchestrator/ agents/ tools/ api/ configs/ core/ --ignore-missing-imports
 
       - name: Test (pytest)
-        run: pytest tests/ -v --cov=. --cov-report=term-missing
-        env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+        run: pytest tests/ -m "not integration" --cov --cov-report=term-missing --cov-fail-under=80

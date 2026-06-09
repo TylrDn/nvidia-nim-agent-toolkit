@@ -5,7 +5,7 @@ import json
 from typing import Optional
 
 import httpx
-from langchain.tools import StructuredTool
+from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 
@@ -45,7 +45,8 @@ def _http_post(url: str, payload: dict, headers: dict | None = None) -> str:
         return f"HTTP POST error: {e}"
 
 
-def get_api_tools() -> list:
+def get_api_tools() -> list[StructuredTool]:
+    """Return the REST API StructuredTools for the API agent."""
     return [
         StructuredTool.from_function(
             func=_http_get,

@@ -12,3 +12,6 @@ build/
 venv/
 *.log
 *.db
+.coverage
+htmlcov/
+faiss_index/

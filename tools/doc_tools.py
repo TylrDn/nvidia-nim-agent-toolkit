@@ -4,13 +4,13 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from langchain.tools import StructuredTool
+from langchain_core.tools import StructuredTool
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from pydantic import BaseModel, Field
 
 NIM_BASE_URL = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NIM_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+NIM_API_KEY = os.getenv("NIM_API_KEY") or os.getenv("NVIDIA_API_KEY", "")
 FAISS_INDEX_PATH = os.getenv("FAISS_INDEX_PATH", "./faiss_index")
 
 _vectorstore = None
@@ -52,7 +52,8 @@ def _search_docs(query: str, k: int = 5) -> str:
         return f"Document search error: {e}"
 
 
-def get_doc_tools() -> list:
+def get_doc_tools() -> list[StructuredTool]:
+    """Return the document-store StructuredTools for the Doc agent."""
     return [
         StructuredTool.from_function(
             func=_search_docs,

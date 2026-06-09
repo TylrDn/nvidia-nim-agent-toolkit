@@ -1,25 +1,42 @@
-"""Integration test for the full LangGraph pipeline."""
+"""Tests for the LangGraph pipeline assembly and async execution."""
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import patch, MagicMock
-from orchestrator.graph import build_graph
+
+from orchestrator.graph import build_graph, run_agent_async
+from tests.conftest import make_ai_message
 
 
-@patch("orchestrator.nodes.planner.get_default_llm")
-@patch("orchestrator.nodes.executor.get_default_llm")
-@patch("orchestrator.nodes.reviewer.get_default_llm")
-def test_graph_builds_and_invokes(mock_reviewer_llm, mock_exec_llm, mock_plan_llm):
-    """Smoke test: graph should compile and complete without errors."""
-    for mock_fn in [mock_plan_llm, mock_exec_llm, mock_reviewer_llm]:
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content='1. Do task one')
-        mock_fn.return_value = mock_llm
+def test_graph_compiles() -> None:
+    assert build_graph() is not None
 
-    # Reviewer must return valid JSON score
-    mock_reviewer_llm.return_value.invoke.return_value = MagicMock(
-        content='{"score": 0.9, "feedback": "Good result"}'
+
+def _patch_node_llm(monkeypatch: pytest.MonkeyPatch, module: str, content: str) -> None:
+    llm = MagicMock()
+    llm.ainvoke = AsyncMock(return_value=make_ai_message(content=content))
+    nim_client = MagicMock()
+    nim_client.as_langchain_llm.return_value = llm
+    monkeypatch.setattr(f"{module}.NIMClient", MagicMock(return_value=nim_client))
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runs_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_node_llm(
+        monkeypatch,
+        "orchestrator.nodes.planner",
+        '[{"id": 1, "description": "look it up", "agent": "doc_agent", "depends_on": []}]',
+    )
+    _patch_node_llm(
+        monkeypatch,
+        "orchestrator.nodes.reviewer",
+        '{"score": 0.95, "verdict": "complete", "final_answer": "42", "feedback": "ok"}',
+    )
+    # Sub-agent run is mocked so the executor returns without touching tools/network.
+    monkeypatch.setattr(
+        "agents.doc_agent.run", AsyncMock(return_value="doc result"), raising=True
     )
 
-    graph = build_graph()
-    assert graph is not None  # graph compiled without error
+    answer = await run_agent_async("what is the answer?", thread_id="t1")
+    assert answer == "42"

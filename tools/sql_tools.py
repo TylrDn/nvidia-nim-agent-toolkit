@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from langchain.tools import StructuredTool
+from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, inspect, text
 
@@ -54,7 +54,8 @@ def _describe_table(table_name: str | None = None) -> str:
         return f"Schema error: {e}"
 
 
-def get_sql_tools() -> list:
+def get_sql_tools() -> list[StructuredTool]:
+    """Return the SQL StructuredTools for the SQL agent."""
     return [
         StructuredTool.from_function(
             func=_run_query,

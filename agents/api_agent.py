@@ -1,50 +1,36 @@
-"""REST API tool-calling agent backed by NIM."""
+"""REST API tool-calling agent backed by NIM.
+
+Configuration (model, prompt, tools, iteration cap) is loaded from
+``configs/agents.yaml`` — no values are hardcoded here.
+"""
 from __future__ import annotations
 
 from typing import Any
 
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import SystemMessage
-
-from nim.client import get_client
+from agents.base import run_tool_agent
+from configs.loader import get_agent_config
 from tools.api_tools import get_api_tools
 
-
-SYSTEM = """\
-You are an API specialist agent. Use the available tools to make REST API calls
-and retrieve data needed to answer the user's request.
-Always prefer structured tool calls over speculation.
-Return a concise, factual answer based only on tool outputs.
-"""
+AGENT_NAME = "api_agent"
 
 
-class APIAgent:
-    """LangChain OpenAI-tools agent wired to NIM for REST API interactions."""
+async def run(query: str, state: Any = None) -> str:
+    """Run the API agent for a single task description.
 
-    def __init__(self) -> None:
-        self.llm = get_client().as_langchain_llm()
-        self.tools = get_api_tools()
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", SYSTEM),
-            MessagesPlaceholder("chat_history", optional=True),
-            ("human", "{input}"),
-            MessagesPlaceholder("agent_scratchpad"),
-        ])
-        agent = create_openai_tools_agent(self.llm, self.tools, prompt)
-        self.executor = AgentExecutor(agent=agent, tools=self.tools, verbose=True, max_iterations=5)
+    Args:
+        query: The task description to handle.
+        state: Unused; present for a uniform sub-agent signature.
 
-    def run(self, query: str, **kwargs: Any) -> str:
-        result = self.executor.invoke({"input": query})
-        return result.get("output", "")
-
-
-_instance: APIAgent | None = None
-
-
-def run(query: str, state: Any = None) -> str:
-    """Module-level entry point used by the executor node."""
-    global _instance
-    if _instance is None:
-        _instance = APIAgent()
-    return _instance.run(query)
+    Returns:
+        str: The agent's final answer.
+    """
+    config = get_agent_config(AGENT_NAME)
+    return await run_tool_agent(
+        agent_name=AGENT_NAME,
+        query=query,
+        tools=get_api_tools(),
+        system_prompt=config.system_prompt,
+        model=config.model,
+        max_iterations=config.max_iterations,
+        temperature=config.temperature,
+    )

@@ -7,13 +7,12 @@ services:
       dockerfile: deploy/Dockerfile
     image: nvidia-nim-agent-toolkit:latest
     container_name: nim-agent-api
+    env_file: ../.env
     ports:
       - "8080:8080"
     environment:
-      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
       - NIM_BASE_URL=${NIM_BASE_URL:-https://integrate.api.nvidia.com/v1}
       - DATABASE_URL=${DATABASE_URL:-sqlite:///./demo.db}
-      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
       - FAISS_INDEX_PATH=/app/faiss_index
     volumes:
       - faiss_data:/app/faiss_index
@@ -24,15 +23,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
-    restart: unless-stopped
-
-  prometheus:
-    image: prom/prometheus:v2.51.0
-    container_name: prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
     restart: unless-stopped
 
 volumes:

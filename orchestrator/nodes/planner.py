@@ -2,46 +2,55 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from nim.client import get_client
+from configs.loader import get_agent_config
+from nim.client import NIMClient, get_callbacks
 from orchestrator.state import AgentState
 
+logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """\
-You are a task planning agent. Given a user query, decompose it into an ordered
-list of discrete subtasks. Each subtask must specify:
-- "id": sequential integer
-- "description": what needs to be done
-- "agent": one of ["api_agent", "sql_agent", "doc_agent"]
-- "depends_on": list of task ids this task depends on (empty list if none)
-
-Return ONLY a JSON array of task objects. No prose, no markdown fences.
-"""
+AGENT_NAME = "planner"
 
 
-def planner_node(state: AgentState) -> dict[str, Any]:
-    """Decompose user_query into task_list."""
-    llm = get_client().as_langchain_llm()
+async def planner_node(state: AgentState) -> dict[str, Any]:
+    """Decompose ``user_query`` into an ordered ``task_list``.
 
-    response = llm.invoke([
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=state["user_query"]),
-    ])
+    Args:
+        state: Current graph state.
 
+    Returns:
+        dict[str, Any]: Partial state update with the task list and counters reset.
+    """
+    config = get_agent_config(AGENT_NAME)
+    llm = NIMClient(model=config.model, temperature=config.temperature).as_langchain_llm()
+
+    response = await llm.ainvoke(
+        [
+            SystemMessage(content=config.system_prompt),
+            HumanMessage(content=state["user_query"]),
+        ],
+        config={"callbacks": get_callbacks()},
+    )
+
+    content = response.content if isinstance(response.content, str) else ""
     try:
-        task_list = json.loads(response.content)
-    except json.JSONDecodeError:
-        # Fallback: single pass-through task
-        task_list = [{
-            "id": 1,
-            "description": state["user_query"],
-            "agent": "doc_agent",
-            "depends_on": [],
-        }]
+        task_list = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Planner returned non-JSON; falling back to single task")
+        task_list = [
+            {
+                "id": 1,
+                "description": state["user_query"],
+                "agent": "doc_agent",
+                "depends_on": [],
+            }
+        ]
 
+    logger.info("Planner produced %d task(s)", len(task_list))
     return {
         "task_list": task_list,
         "current_task_index": 0,

@@ -1,127 +1,176 @@
 """NIM client — wraps NVIDIA NIM inference endpoints.
 
-Langfuse tracing is supported via the LangChain path (`as_langchain_llm()`).
-The raw OpenAI SDK path (`chat()`, `stream_chat()`, `chat_with_tools()`) does
-NOT support LangChain callbacks; set LANGFUSE_PUBLIC_KEY to enable tracing
-only when calling through `as_langchain_llm()`.
+All LLM calls in this repository route through :class:`NIMClient`. Tracing is
+enabled by attaching the Langfuse :class:`CallbackHandler` (via
+:func:`get_callbacks`) to every LangChain invocation. The async raw-SDK paths
+use ``openai.AsyncOpenAI`` and are wrapped with ``tenacity`` retries.
 """
-
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
-from typing import Any, Generator, Iterator
+from typing import Any, AsyncIterator, cast
 
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from openai import OpenAI
+from openai import AsyncOpenAI, APIError, RateLimitError
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_MODEL = os.getenv("NIM_DEFAULT_MODEL", "meta/llama-3.1-70b-instruct")
 
 # ---------------------------------------------------------------------------
-# Optional Langfuse import
+# Optional Langfuse import — tracing degrades gracefully if unavailable.
 # ---------------------------------------------------------------------------
 try:
-    from langfuse.callback import CallbackHandler as LangfuseCallbackHandler
+    from langfuse.callback import CallbackHandler
 
     LANGFUSE_AVAILABLE = True
-except ImportError:  # langfuse not installed — tracing silently disabled
-    LangfuseCallbackHandler = None  # type: ignore[assignment,misc]
+except ImportError:  # pragma: no cover - exercised only without langfuse
+    CallbackHandler = None  # type: ignore[assignment,misc]
     LANGFUSE_AVAILABLE = False
 
 
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
+class NIMClientError(Exception):
+    """Base error for NIM client failures."""
 
-def _get_langfuse_handler() -> "LangfuseCallbackHandler | None":
-    """Return a Langfuse CallbackHandler if credentials are configured.
 
-    Returns ``None`` (and never raises) when:
-    - ``langfuse`` package is not installed
-    - ``LANGFUSE_PUBLIC_KEY`` env var is not set
+class NIMRateLimitError(NIMClientError):
+    """Raised when the NIM endpoint reports rate limiting."""
+
+
+def get_langfuse_handler() -> "CallbackHandler | None":
+    """Return a configured Langfuse callback handler, or ``None`` if disabled.
+
+    Reads ``LANGFUSE_PUBLIC_KEY``, ``LANGFUSE_SECRET_KEY``, and ``LANGFUSE_HOST``
+    from the environment. Logs a warning and returns ``None`` when the package
+    is not installed or credentials are absent, so tracing never raises.
+
+    Returns:
+        CallbackHandler | None: Handler when configured, otherwise ``None``.
     """
     if not LANGFUSE_AVAILABLE:
+        logger.warning("langfuse not installed — tracing disabled.")
         return None
-    if os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"):
-        return LangfuseCallbackHandler(
-            public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
-            secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
-            host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"),
+
+    public_key = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+    secret_key = os.environ.get("LANGFUSE_SECRET_KEY", "")
+    host = os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
+    if not public_key or not secret_key:
+        logger.warning(
+            "LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY not set — tracing disabled."
         )
-    return None
+        return None
+
+    return CallbackHandler(public_key=public_key, secret_key=secret_key, host=host)
 
 
-# ---------------------------------------------------------------------------
-# NIMClient
-# ---------------------------------------------------------------------------
+def get_callbacks() -> list[Any]:
+    """Return the list of active LangChain callbacks for an invocation.
+
+    Returns:
+        list[Any]: ``[langfuse_handler]`` when tracing is configured, else ``[]``.
+    """
+    handler = get_langfuse_handler()
+    return [handler] if handler else []
+
+
+def _resolve_api_key(explicit: str | None) -> str:
+    """Resolve the NIM API key, preferring ``NIM_API_KEY``.
+
+    Args:
+        explicit: An explicitly passed key, if any.
+
+    Returns:
+        str: The resolved key (may be empty if unset).
+    """
+    return explicit or os.getenv("NIM_API_KEY") or os.getenv("NVIDIA_API_KEY") or ""
+
 
 class NIMClient:
-    """Client for NVIDIA NIM inference endpoints.
+    """Client for NVIDIA NIM inference endpoints (OpenAI-compatible).
 
-    Environment variables
-    ---------------------
-    NVIDIA_API_KEY : str
-        API key for NVIDIA NIM / NGC.
-    NIM_BASE_URL : str
-        Base URL for the NIM endpoint (default: ``https://integrate.api.nvidia.com/v1``).
-    LANGFUSE_PUBLIC_KEY : str, optional
-        Enable Langfuse tracing on LangChain calls.
-    LANGFUSE_SECRET_KEY : str, optional
-        Langfuse secret key.
-    LANGFUSE_HOST : str, optional
-        Langfuse server URL (default: ``https://cloud.langfuse.com``).
+    Environment variables:
+        NIM_API_KEY: API key for NVIDIA NIM (falls back to ``NVIDIA_API_KEY``).
+        NIM_BASE_URL: Base URL for the NIM endpoint.
+        LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST: Tracing.
     """
 
     def __init__(
         self,
-        model: str = "meta/llama-3.1-8b-instruct",
-        temperature: float = 0.7,
+        model: str = DEFAULT_MODEL,
+        temperature: float = 0.0,
         max_tokens: int = 1024,
         base_url: str | None = None,
         api_key: str | None = None,
     ) -> None:
+        """Initialize a NIM client.
+
+        Args:
+            model: NIM model name.
+            temperature: Sampling temperature.
+            max_tokens: Maximum completion tokens.
+            base_url: Override for the NIM base URL.
+            api_key: Override for the NIM API key.
+        """
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.base_url = base_url or os.getenv(
-            "NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"
-        )
-        self.api_key = api_key or os.getenv("NVIDIA_API_KEY", "")
+        self.base_url = base_url or os.getenv("NIM_BASE_URL", DEFAULT_BASE_URL)
+        self.api_key = _resolve_api_key(api_key)
+        self._async_client: AsyncOpenAI | None = None
 
     # ------------------------------------------------------------------
     # LangChain integration (Langfuse tracing supported here)
     # ------------------------------------------------------------------
 
     def as_langchain_llm(self, **kwargs: Any) -> ChatOpenAI:
-        """Return a LangChain ``ChatOpenAI`` instance pointed at the NIM endpoint.
+        """Return a ``ChatOpenAI`` pointed at NIM with Langfuse tracing attached.
 
-        Langfuse tracing is automatically attached as a callback when
-        ``LANGFUSE_PUBLIC_KEY`` and ``LANGFUSE_SECRET_KEY`` are set.
+        Args:
+            **kwargs: Extra keyword arguments forwarded to ``ChatOpenAI``.
+
+        Returns:
+            ChatOpenAI: Configured LLM with ``callbacks`` set.
         """
-        handler = _get_langfuse_handler()
-        callbacks = [handler] if handler else []
-
-        return ChatOpenAI(
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            openai_api_base=self.base_url,
-            openai_api_key=self.api_key,
-            callbacks=callbacks,
+        params: dict[str, Any] = {
+            "model": self.model,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+            "callbacks": get_callbacks(),
             **kwargs,
-        )
+        }
+        return ChatOpenAI(**params)
 
     # ------------------------------------------------------------------
-    # Raw OpenAI SDK methods
-    # NOTE: Langfuse LangChain callbacks are NOT supported on these paths.
-    #       Use as_langchain_llm() for traced calls.
+    # Async raw OpenAI SDK methods
     # ------------------------------------------------------------------
 
-    def _get_openai_client(self) -> OpenAI:
-        """Return a raw OpenAI SDK client pointed at the NIM endpoint."""
-        return OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-        )
+    def _get_async_client(self) -> AsyncOpenAI:
+        """Return (and cache) the underlying ``AsyncOpenAI`` client."""
+        if self._async_client is None:
+            self._async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+        return self._async_client
 
-    def chat(
+    @retry(
+        retry=retry_if_exception_type((APIError, NIMRateLimitError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True,
+    )
+    async def chat_completion(
         self,
         messages: list[dict[str, str]],
         temperature: float | None = None,
@@ -130,78 +179,107 @@ class NIMClient:
     ) -> str:
         """Send a chat request and return the assistant's message content.
 
-        Note: Langfuse tracing is **not** available on this raw SDK path.
-        Switch to ``as_langchain_llm()`` for traced inference.
-        """
-        client = self._get_openai_client()
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature if temperature is not None else self.temperature,
-            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
-            **kwargs,
-        )
-        return response.choices[0].message.content
+        Args:
+            messages: OpenAI-style message dicts.
+            temperature: Override the client default.
+            max_tokens: Override the client default.
+            **kwargs: Extra arguments forwarded to the API.
 
-    def stream_chat(
+        Returns:
+            str: The assistant message content.
+
+        Raises:
+            NIMRateLimitError: If the endpoint reports rate limiting.
+            NIMClientError: On other API failures.
+        """
+        client = self._get_async_client()
+        try:
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=cast(Any, messages),
+                temperature=temperature if temperature is not None else self.temperature,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+                **kwargs,
+            )
+        except RateLimitError as exc:
+            logger.error("NIM rate limit hit: %s", exc)
+            raise NIMRateLimitError(str(exc)) from exc
+        except APIError as exc:
+            logger.error("NIM API error: %s", exc)
+            raise
+        return response.choices[0].message.content or ""
+
+    async def stream_chat(
         self,
         messages: list[dict[str, str]],
         temperature: float | None = None,
         max_tokens: int | None = None,
         **kwargs: Any,
-    ) -> Iterator[str]:
+    ) -> AsyncIterator[str]:
         """Stream a chat response, yielding content chunks as they arrive.
 
-        Note: Langfuse tracing is **not** available on this raw SDK path.
-        Switch to ``as_langchain_llm()`` for traced inference.
+        Args:
+            messages: OpenAI-style message dicts.
+            temperature: Override the client default.
+            max_tokens: Override the client default.
+            **kwargs: Extra arguments forwarded to the API.
+
+        Yields:
+            str: Content deltas.
         """
-        client = self._get_openai_client()
-        stream = client.chat.completions.create(
+        client = self._get_async_client()
+        stream: Any = await client.chat.completions.create(
             model=self.model,
-            messages=messages,
+            messages=cast(Any, messages),
             temperature=temperature if temperature is not None else self.temperature,
             max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
             stream=True,
             **kwargs,
         )
-        for chunk in stream:
+        async for chunk in stream:
             delta = chunk.choices[0].delta
             if delta.content is not None:
                 yield delta.content
 
-    def chat_with_tools(
+    async def batch_chat_completion(
         self,
-        messages: list[dict[str, str]],
-        tools: list[dict[str, Any]],
-        tool_choice: str | dict[str, Any] = "auto",
-        temperature: float | None = None,
-        max_tokens: int | None = None,
+        batch: list[list[dict[str, str]]],
         **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Send a chat request with tool/function definitions.
+    ) -> list[str]:
+        """Run multiple chat completions concurrently.
 
-        Returns the raw ``choices[0].message`` as a dict so callers can
-        inspect ``tool_calls`` and ``content``.
+        Args:
+            batch: A list of message lists, one per request.
+            **kwargs: Extra arguments forwarded to each ``chat_completion``.
 
-        Note: Langfuse tracing is **not** available on this raw SDK path.
-        Switch to ``as_langchain_llm()`` for traced inference.
+        Returns:
+            list[str]: Completion content in the same order as ``batch``.
         """
-        client = self._get_openai_client()
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            tool_choice=tool_choice,
-            temperature=temperature if temperature is not None else self.temperature,
-            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
-            **kwargs,
-        )
-        message = response.choices[0].message
-        return {
-            "content": message.content,
-            "tool_calls": message.tool_calls,
-            "role": message.role,
-        }
+        tasks = [self.chat_completion(messages, **kwargs) for messages in batch]
+        return await asyncio.gather(*tasks)
+
+    @retry(
+        retry=retry_if_exception_type(APIError),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True,
+    )
+    async def list_models(self) -> list[str]:
+        """List model IDs available at the NIM endpoint.
+
+        Returns:
+            list[str]: Sorted model identifiers.
+
+        Raises:
+            NIMClientError: If the models endpoint is unreachable.
+        """
+        client = self._get_async_client()
+        try:
+            response = await client.models.list()
+        except APIError as exc:
+            logger.error("Failed to list NIM models: %s", exc)
+            raise
+        return sorted(model.id for model in response.data)
 
 
 # ---------------------------------------------------------------------------
@@ -212,16 +290,24 @@ _client_instance: NIMClient | None = None
 
 
 def get_client(
-    model: str = "meta/llama-3.1-8b-instruct",
-    temperature: float = 0.7,
+    model: str = DEFAULT_MODEL,
+    temperature: float = 0.0,
     max_tokens: int = 1024,
     **kwargs: Any,
 ) -> NIMClient:
     """Return (or lazily create) the module-level ``NIMClient`` singleton.
 
-    Subsequent calls with the same arguments return the cached instance.
-    Pass different arguments to force a new instance by constructing
-    ``NIMClient(...)`` directly.
+    The singleton is created on first call. For a client bound to a different
+    model, construct ``NIMClient(model=...)`` directly.
+
+    Args:
+        model: NIM model name for the initial construction.
+        temperature: Sampling temperature for the initial construction.
+        max_tokens: Maximum completion tokens for the initial construction.
+        **kwargs: Extra arguments forwarded to ``NIMClient``.
+
+    Returns:
+        NIMClient: The shared client instance.
     """
     global _client_instance
     if _client_instance is None:

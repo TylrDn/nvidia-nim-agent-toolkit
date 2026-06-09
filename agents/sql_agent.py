@@ -1,48 +1,36 @@
-"""Text-to-SQL agent backed by NIM + SQLAlchemy."""
+"""Text-to-SQL agent backed by NIM + SQLAlchemy.
+
+Configuration (model, prompt, tools, iteration cap) is loaded from
+``configs/agents.yaml`` — no values are hardcoded here.
+"""
 from __future__ import annotations
 
 from typing import Any
 
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-
-from nim.client import get_client
+from agents.base import run_tool_agent
+from configs.loader import get_agent_config
 from tools.sql_tools import get_sql_tools
 
-
-SYSTEM = """\
-You are a SQL specialist agent. Translate the user's natural language request
-into SQL queries, execute them using the available tools, and return the results
-as structured data or a clear summary.
-Never guess schema — always introspect the database first.
-"""
+AGENT_NAME = "sql_agent"
 
 
-class SQLAgent:
-    """LangChain OpenAI-tools agent for text-to-SQL via NIM."""
+async def run(query: str, state: Any = None) -> str:
+    """Run the SQL agent for a single task description.
 
-    def __init__(self) -> None:
-        self.llm = get_client().as_langchain_llm()
-        self.tools = get_sql_tools()
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", SYSTEM),
-            MessagesPlaceholder("chat_history", optional=True),
-            ("human", "{input}"),
-            MessagesPlaceholder("agent_scratchpad"),
-        ])
-        agent = create_openai_tools_agent(self.llm, self.tools, prompt)
-        self.executor = AgentExecutor(agent=agent, tools=self.tools, verbose=True, max_iterations=5)
+    Args:
+        query: The task description to handle.
+        state: Unused; present for a uniform sub-agent signature.
 
-    def run(self, query: str, **kwargs: Any) -> str:
-        result = self.executor.invoke({"input": query})
-        return result.get("output", "")
-
-
-_instance: SQLAgent | None = None
-
-
-def run(query: str, state: Any = None) -> str:
-    global _instance
-    if _instance is None:
-        _instance = SQLAgent()
-    return _instance.run(query)
+    Returns:
+        str: The agent's final answer.
+    """
+    config = get_agent_config(AGENT_NAME)
+    return await run_tool_agent(
+        agent_name=AGENT_NAME,
+        query=query,
+        tools=get_sql_tools(),
+        system_prompt=config.system_prompt,
+        model=config.model,
+        max_iterations=config.max_iterations,
+        temperature=config.temperature,
+    )

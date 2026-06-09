@@ -1,34 +1,22 @@
-"""Unit tests for AgentState schema."""
+"""Unit tests for the AgentState schema."""
 from __future__ import annotations
 
-from orchestrator.state import AgentState, SubTask
+from orchestrator.state import AgentState
 
 
-def test_subtask_creation():
-    task = SubTask(
-        task_id="t1",
-        description="Fetch weather data",
-        agent="api",
-        status="pending",
-        result=None,
-    )
-    assert task["agent"] == "api"
-    assert task["status"] == "pending"
-
-
-def test_agent_state_structure():
+def test_agent_state_structure() -> None:
     state: AgentState = {
+        "messages": [],
         "user_query": "What is the weather in Seattle?",
-        "session_id": "abc123",
-        "plan": [],
+        "task_list": [],
         "current_task_index": 0,
         "task_results": [],
+        "final_answer": "",
         "reviewer_score": 0.0,
-        "reviewer_feedback": "",
-        "loop_count": 0,
-        "max_loops": 3,
-        "final_answer": None,
-        "error": None,
+        "retry_count": 0,
+        "routing_key": "",
+        "metadata": {},
     }
     assert state["user_query"] == "What is the weather in Seattle?"
-    assert state["max_loops"] == 3
+    assert isinstance(state["task_list"], list)
+    assert state["current_task_index"] == 0

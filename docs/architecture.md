@@ -59,14 +59,19 @@ AgentState
 ## NIM Integration Pattern
 
 All LLM calls route through `nim/client.py` via the OpenAI-compatible REST API.
-Swapping models requires only changing `nim/config.yaml` — no Python code changes.
+Agent models, prompts, tools, and iteration caps live in `configs/agents.yaml`
+and are validated at startup by `configs/loader.py` — no Python code changes are
+needed to swap a model or edit a prompt.
 
 ```python
-from nim.client import get_client
+from nim.client import NIMClient
 
-llm = get_client().as_langchain_llm()   # Returns ChatOpenAI pointed at NIM
-response = llm.invoke(messages)
+llm = NIMClient(model="meta/llama-3.1-70b-instruct").as_langchain_llm()
+response = await llm.ainvoke(messages, config={"callbacks": get_callbacks()})
 ```
+
+Tracing is attached to every LangChain invocation via the Langfuse
+`CallbackHandler` returned by `nim.client.get_callbacks()`.
 
 ## Cross-Repo Integration
 

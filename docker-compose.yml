@@ -1,8 +1,29 @@
-version: "3.9"
+# Root developer-convenience compose.
+#
+#   docker compose --profile dev up   → orchestrator only, cloud NIM via .env
+#   docker compose --profile full up  → also starts a local GPU NIM service
+#
+# The orchestrator runs under both profiles; the GPU `nim` service is opt-in.
 services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    container_name: nim-agent-orchestrator
+    profiles: [dev, full]
+    env_file: .env
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
   nim:
     image: nvcr.io/nim/meta/llama-3.1-8b-instruct:latest
     container_name: nim-llama3
+    profiles: [full]
     ports:
       - "8000:8000"
     environment:
@@ -23,30 +44,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-
-  orchestrator:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
-    container_name: nim-agent-orchestrator
-    ports:
-      - "8080:8080"
-    environment:
-      - NIM_BASE_URL=http://nim:8000/v1
-      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
-      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
-      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
-      - LANGFUSE_HOST=${LANGFUSE_HOST:-https://cloud.langfuse.com}
-    depends_on:
-      nim:
-        condition: service_healthy
-    volumes:
-      - .:/app
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
 
 volumes:
   nim-cache:

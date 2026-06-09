@@ -26,7 +26,7 @@ See [docs/architecture.md](docs/architecture.md) for the full Mermaid diagram.
 
 ```bash
 cp .env.template .env
-# Add your NVIDIA_API_KEY to .env
+# Add your NIM_API_KEY to .env
 
 pip install -r requirements.txt
 uvicorn api.server:app --reload --port 8080
@@ -34,10 +34,19 @@ uvicorn api.server:app --reload --port 8080
 
 ## Docker
 
+The root `docker-compose.yml` exposes two profiles:
+
 ```bash
-cd deploy
-docker-compose up --build
+# Cloud NIM (build.nvidia.com) — orchestrator only
+docker compose --profile dev up --build
+
+# Local GPU NIM — also starts an on-host NIM container (requires NVIDIA GPU)
+docker compose --profile full up --build
 ```
+
+For the `full` profile, set `NIM_BASE_URL=http://nim:8000/v1` in `.env` so the
+orchestrator targets the local NIM service. The production-parameterized compose
+lives in [`deploy/docker-compose.yml`](deploy/docker-compose.yml).
 
 The API will be available at `http://localhost:8080`.
 
@@ -71,23 +80,32 @@ curl -X POST http://localhost:8080/query \
 | `tools/` | StructuredTool wrappers (http, sql, faiss) |
 | `evals/agent_eval.py` | LangSmith evaluation harness |
 
-## NIM Model Configuration
+## Agent Configuration
 
-Swap models in `nim/config.yaml` — no Python code changes required:
+Agent personas, models, prompts, tools, and iteration caps live in
+[`configs/agents.yaml`](configs/agents.yaml) and are validated at startup by
+`configs/loader.py` — no Python code changes required to swap a model or edit a
+prompt:
 
 ```yaml
-default_model: meta/llama-3.1-70b-instruct
+agents:
+  planner:
+    model: meta/llama-3.1-70b-instruct
+    system_prompt: |
+      You are a task planning agent. ...
 ```
 
 ## Environment Variables
 
 | Variable | Description |
 |---|---|
-| `NVIDIA_API_KEY` | NVIDIA build.nvidia.com API key |
+| `NIM_API_KEY` | NVIDIA NIM API key (falls back to `NVIDIA_API_KEY`) |
 | `NIM_BASE_URL` | NIM endpoint (default: build.nvidia.com) |
+| `NIM_DEFAULT_MODEL` | Default model when not set per-agent |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | Langfuse tracing |
 | `DATABASE_URL` | SQLAlchemy DB URL for SQL agent |
-| `LANGSMITH_API_KEY` | LangSmith tracing + evals |
 | `FAISS_INDEX_PATH` | Path to FAISS vector index |
+| `LOG_LEVEL` / `LOG_FORMAT` | Logging level and `text`/`json` format |
 
 ## Cross-Repo Integration
 

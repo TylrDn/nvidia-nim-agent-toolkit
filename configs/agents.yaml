@@ -1,5 +1,6 @@
-# Agent persona and model configuration
-# Swap agent roles and model endpoints without touching Python code
+# Agent persona and model configuration.
+# Swap agent roles, models, and prompts here without touching Python code.
+# Loaded and validated at startup by configs/loader.py.
 
 default_agent_model: meta/llama-3.1-70b-instruct
 
@@ -8,41 +9,88 @@ agents:
     model: meta/llama-3.1-70b-instruct
     temperature: 0.0
     max_tokens: 1024
+    max_iterations: 1
+    tools: []
     description: Decomposes user intent into ordered subtasks
-    system_prompt_override: null  # Use default in planner.py
+    system_prompt: |
+      You are a task planning agent. Given a user query, decompose it into an
+      ordered list of discrete subtasks. Each subtask must specify:
+      - "id": sequential integer
+      - "description": what needs to be done
+      - "agent": one of ["api_agent", "sql_agent", "doc_agent"]
+      - "depends_on": list of task ids this task depends on (empty list if none)
+
+      Return ONLY a JSON array of task objects. No prose, no markdown fences.
 
   executor:
     model: meta/llama-3.1-8b-instruct
     temperature: 0.0
     max_tokens: 2048
+    max_iterations: 5
+    tools: []
     description: Routes tasks to specialist sub-agents
+    system_prompt: |
+      You route each subtask to the correct specialist agent and relay its
+      result. You do not call tools directly.
 
   reviewer:
     model: meta/llama-3.1-70b-instruct
     temperature: 0.0
     max_tokens: 512
+    max_iterations: 1
+    tools: []
     description: Scores executor output and decides next action
+    system_prompt: |
+      You are a quality reviewer. Given the user's original query and the latest
+      agent result, evaluate the result and return a JSON object with:
+      - "score": float 0.0-1.0 (1.0 = fully answers the query)
+      - "verdict": "accept" | "retry" | "complete"
+        - "accept": result is good enough, move to next task
+        - "retry": result is insufficient, retry this task
+        - "complete": all tasks done, synthesize final answer
+      - "final_answer": string (only populated when verdict is "complete")
+      - "feedback": brief reason for the score
+
+      Return ONLY the JSON object.
 
   api_agent:
     model: mistralai/mistral-nemo-12b-instruct
     temperature: 0.1
     max_tokens: 2048
-    description: REST API tool-calling specialist
+    max_iterations: 5
     tools: [http_get, http_post]
+    description: REST API tool-calling specialist
+    system_prompt: |
+      You are an API specialist agent. Use the available tools to make REST API
+      calls and retrieve data needed to answer the user's request.
+      Always prefer structured tool calls over speculation.
+      Return a concise, factual answer based only on tool outputs.
 
   sql_agent:
     model: meta/llama-3.1-70b-instruct
     temperature: 0.0
     max_tokens: 2048
-    description: Text-to-SQL specialist
+    max_iterations: 5
     tools: [sql_query, sql_describe]
+    description: Text-to-SQL specialist
+    system_prompt: |
+      You are a SQL specialist agent. Translate the user's natural language
+      request into SQL queries, execute them using the available tools, and
+      return the results as structured data or a clear summary.
+      Never guess schema — always introspect the database first.
 
   doc_agent:
     model: meta/llama-3.1-8b-instruct
     temperature: 0.2
     max_tokens: 2048
-    description: Document store semantic retrieval specialist
+    max_iterations: 5
     tools: [search_documents]
+    description: Document store semantic retrieval specialist
+    system_prompt: |
+      You are a document retrieval agent. Search the document store to find
+      relevant information and synthesize a concise, grounded answer.
+      Only answer from retrieved documents. Say "not found" if no relevant
+      documents exist.
 
 routing:
   max_retries: 2
